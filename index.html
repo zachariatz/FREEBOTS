@@ -2,289 +2,443 @@
 <html lang="en" >
 <head>
   <meta charset="UTF-8">
-  <title>MD ID DIGIT SHIFT PRO+</title>
+  <title>DIFFERS SMART AI by RISKTAKER.tz</title>
   <link rel="stylesheet" href="./style.css">
 
 </head>
 <body>
 <!-- partial:index.partial.html -->
-<!-- MD+ RISKTAKER PRO BOT — HTML -->
+<!-- index.html -->
 
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!DOCTYPE html>
 
-<div class="app-wrap">
+<html lang="en">
 
-  <header class="glass header">
+<head>
 
-    <div class="brand">
+  <meta charset="UTF-8" />
 
-      <div class="logo-pip"></div>
+  <title>M/D PREMIER RISKTAKER.tz AI SUPER BOT</title>
 
-      <h1>MD+ RISKTAKER PRO BOT</h1>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-      <span class="badge">Digit Differ • 1-tick</span>
+  <link rel="preconnect" href="https://ws.derivws.com" />
 
-    </div>
+  <link rel="stylesheet" href="style.css" />
 
-    <div class="status">
+</head>
 
-      <div class="dot" id="connDot"></div>
+<body>
 
-      <span id="connText">Disconnected</span>
+  <!-- Fixed Header -->
+
+  <header id="appHeader" class="app-title" role="banner" aria-label="Application Header">
+
+    <h1>M/D PREMIER RISKTAKER.tz AI SUPER BOT</h1>
+
+    <div class="badges" aria-live="polite">
+
+      <span id="connBadge" class="badge">DISCONNECTED</span>
+
+      <span id="accountId" class="badge">—</span>
+
+      <span id="balance" class="badge">Balance: —</span>
+
+      <span id="sessionPL" class="badge">P/L: 0.00</span>
+
+      <span id="marketNow" class="badge">Market: —</span>
 
     </div>
 
   </header>
 
-  <section class="glass controls">
+  <!-- All notifications, overlays, arming banner -->
 
-    <div class="row">
+  <div id="notificationLayer" class="notification-layer" role="region" aria-live="polite" aria-atomic="false">
 
-      <label>Deriv API Token</label>
+    <!-- Arming banner (opaque, just beneath header) -->
 
-      <div class="token-row">
+    <div id="armingBanner" class="arming-banner hidden" role="status" aria-live="assertive" aria-atomic="true">
 
-        <input id="apiToken" type="password" autocomplete="off" value="FPIdMb74AcLFmkt" placeholder="Enter your Deriv API token" />
+      <div class="arming-content">
 
-        <button id="btnConnect" class="btn-primary">Connect</button>
+        <div class="arming-title" id="armingTitle">Armed — scanning for reappearance</div>
 
-      </div>
+        <div class="arming-row">
 
-      <small class="hint">Token is masked. Balance subscription starts immediately after a successful authorization.</small>
+          <div class="arming-chipset" id="armingDigits" aria-label="Live digits stream"></div>
 
-    </div>
+          <div class="arming-window" aria-label="Remaining window">
 
-    <div class="grid">
+            <span>Window:</span>
 
-      <div class="col">
+            <strong id="armingWindow">6</strong>
 
-        <label>Stake % of balance</label>
+          </div>
 
-        <input id="stakePct" type="number" min="1" max="100" value="50" />
-
-      </div>
-
-      <div class="col">
-
-        <label>Low-balance stake threshold</label>
-
-        <input id="lowBalanceThreshold" type="number" step="0.01" min="0" value="0.35" />
-
-      </div>
-
-      <div class="col">
-
-        <label>Min run length (identical digits)</label>
-
-        <input id="minRun" type="number" min="1" max="50" value="2" />
-
-      </div>
-
-      <div class="col">
-
-        <label>Trades per armed signal</label>
-
-        <input id="tradesPerSignal" type="number" min="1" max="50" value="3" />
-
-      </div>
-
-      <div class="col">
-
-        <label>Distribution window N (ticks)</label>
-
-        <input id="distN" type="number" min="25" max="25000" value="1000" />
-
-      </div>
-
-      <div class="col">
-
-        <label>Rotation mode</label>
-
-        <select id="rotationMode">
-
-          <option value="series" selected>Series</option>
-
-          <option value="random">Random</option>
-
-        </select>
-
-      </div>
-
-      <div class="col">
-
-        <label>Take Profit (acct ccy)</label>
-
-        <input id="takeProfit" type="number" step="0.01" value="999999" />
-
-      </div>
-
-      <div class="col">
-
-        <label>Stop Loss (acct ccy)</label>
-
-        <input id="stopLoss" type="number" step="0.01" value="999999" />
+        </div>
 
       </div>
 
     </div>
 
-    <div class="row">
+    <!-- Phase/session summary overlay (opaque) -->
 
-      <label>Market</label>
+    <div id="summaryOverlay" class="summary-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="summaryTitle">
 
-      <select id="marketSelect" class="wide">
+      <div class="summary-card">
 
-        <option value="1HZ10V">1HZ10V – VOLATILITY 10 (1S) INDEX</option>
+        <h3 id="summaryTitle">SUMMARY</h3>
 
-        <option value="R_10">R_10 – VOLATILITY 10 INDEX</option>
+        <div id="summaryBody" class="summary-body"></div>
 
-        <option value="1HZ15V">1HZ15V – VOLATILITY 15 (1S) INDEX</option>
-
-        <option value="1HZ25V">1HZ25V – VOLATILITY 25 (1S) INDEX</option>
-
-        <option value="R_25">R_25 – VOLATILITY 25 INDEX</option>
-
-        <option value="1HZ30V">1HZ30V – VOLATILITY 30 (1S) INDEX</option>
-
-        <option value="1HZ50V">1HZ50V – VOLATILITY 50 (1S) INDEX</option>
-
-        <option value="R_50">R_50 – VOLATILITY 50 INDEX</option>
-
-        <option value="1HZ75V">1HZ75V – VOLATILITY 75 (1S) INDEX</option>
-
-        <option value="R_75">R_75 – VOLATILITY 75 INDEX</option>
-
-        <option value="1HZ90V">1HZ90V – VOLATILITY 90 (1S) INDEX</option>
-
-        <option value="1HZ100V">1HZ100V – VOLATILITY 100 (1S) INDEX</option>
-
-        <option value="R_100" selected>R_100 – VOLATILITY 100 INDEX</option>
-
-      </select>
-
-    </div>
-
-    <div class="action-row">
-
-      <button id="btnStart" class="btn-success">Start</button>
-
-      <button id="btnStop" class="btn-danger">Stop</button>
-
-      <div class="balance">
-
-        <span class="label">Balance:</span>
-
-        <span id="balanceVal">—</span>
-
-        <span id="balanceCcy"></span>
-
-      </div>
-
-      <div class="market-now">
-
-        <span class="label">Current:</span>
-
-        <span id="marketName">R_100 – VOLATILITY 100 INDEX</span>
+        <div class="countdown">Continuing in <span id="summaryCountdown">5</span>s…</div>
 
       </div>
 
     </div>
-
-  </section>
-
-  <section class="glass data-panels">
-
-    <div class="digits-panel">
-
-      <h3>Last 7 digits</h3>
-
-      <div id="last7" class="digit-ribbon"></div>
-
-    </div>
-
-    <div class="distribution-panel">
-
-      <h3>Digit distribution (counts & % of last <span id="nWindow">1000</span> ticks)</h3>
-
-      <div id="distGrid" class="dist-grid"></div>
-
-    </div>
-
-  </section>
-
-  <section class="glass logs">
-
-    <div class="logs-head">
-
-      <h3>Live Log</h3>
-
-      <div class="pill" id="pnlPill">P/L: <span id="pnlVal">0.00</span> <span id="pnlCcy"></span></div>
-
-      <div class="pill" id="cyclePill">Cycle: <span id="cycleInfo">—</span></div>
-
-    </div>
-
-    <div id="log" class="log-body"></div>
-
-  </section>
-
-</div>
-
-<!-- Armed Signal Overlay (JS triggers visibility) -->
-
-<div id="armedOverlay" class="armed-overlay hidden">
-
-  <div class="armed-card">
-
-    <div class="armed-title">ARMED SIGNAL</div>
-
-    <div class="armed-digit" id="armedDigit">—</div>
-
-    <div class="armed-sub">Digit Differ • 1-tick • Barrier = breakout digit</div>
 
   </div>
 
-</div>
+  <main class="content" id="contentRoot">
 
-<!-- Market Shift Summary Overlay (10s) -->
+    <!-- A) API & Account -->
 
-<div id="shiftOverlay" class="shift-overlay hidden">
+    <section class="card" aria-labelledby="secA">
 
-  <div class="shift-card">
+      <h2 id="secA">A) API &amp; Account</h2>
 
-    <h2 id="shiftTitle">Market Summary</h2>
+      <div class="row">
 
-    <div class="shift-grid">
+        <label class="label" for="apiToken">API Token</label>
 
-      <div><span>Market</span><b id="sumMarket">—</b></div>
+        <input id="apiToken" type="password" placeholder="Enter your Deriv API token" autocomplete="off" spellcheck="false" title="Your Deriv API token. Never shared or logged." />
 
-      <div><span>Timeframe</span><b id="sumTimeframe">—</b></div>
+        <div class="actions row">
 
-      <div><span>Signals</span><b id="sumSignals">0</b></div>
+          <button id="connectBtn" class="btn primary" title="Connect & authorize using the token above">Connect</button>
 
-      <div><span>Trades</span><b id="sumTrades">0</b></div>
+          <button id="disconnectBtn" class="btn ghost" title="Disconnect from Deriv WebSocket">Disconnect</button>
 
-      <div><span>Win / Loss</span><b id="sumWL">0 / 0</b></div>
+        </div>
 
-      <div><span>Net P/L</span><b id="sumPL">0</b></div>
+      </div>
 
-      <div><span>Avg Stake</span><b id="sumAvgStake">—</b></div>
+    </section>
 
-      <div><span>Ignored (exclusion)</span><b id="sumIgnored">0</b></div>
+    <div class="grid two">
 
-      <div><span>Next Market</span><b id="sumNext">—</b></div>
+      <!-- B) Market & Core Settings -->
+
+      <section class="card" aria-labelledby="secB">
+
+        <h2 id="secB">B) Market &amp; Core Settings</h2>
+
+        <div class="row">
+
+          <label class="label" for="marketSelect">Market</label>
+
+          <select id="marketSelect" title="Select market symbol">
+
+            <option value="1HZ10V">VOLATILITY 10 (1S)</option>
+
+            <option value="R_10">VOLATILITY 10</option>
+
+            <option value="1HZ15V">VOLATILITY 15 (1S)</option>
+
+            <option value="1HZ25V">VOLATILITY 25 (1S)</option>
+
+            <option value="R_25">VOLATILITY 25</option>
+
+            <option value="1HZ30V">VOLATILITY 30 (1S)</option>
+
+            <option value="1HZ50V">VOLATILITY 50 (1S)</option>
+
+            <option value="R_50">VOLATILITY 50</option>
+
+            <option value="1HZ75V">VOLATILITY 75 (1S)</option>
+
+            <option value="R_75">VOLATILITY 75</option>
+
+            <option value="1HZ90V">VOLATILITY 90 (1S)</option>
+
+            <option value="1HZ100V">VOLATILITY 100 (1S)</option>
+
+            <option value="R_100">VOLATILITY 100</option>
+
+          </select>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="contractType">Contract</label>
+
+          <select id="contractType" title="Contract type (informational; execution uses DIGITDIFF)">
+
+            <option value="DIGITDIFF" selected>DIGITDIFF</option>
+
+            <option value="DIGITMATCH">DIGITMATCH</option>
+
+          </select>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="stakeAmount">Stake (USD)</label>
+
+          <input id="stakeAmount" type="number" min="0.35" step="0.01" value="0.50" title="Core stake per run (ignored when SBR is ON)" />
+
+          <span class="hint" id="coreStakeHint"></span>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="runsPerSignal">Runs per Signal</label>
+
+          <input id="runsPerSignal" type="number" min="1" step="1" value="1" title="Number of sequential runs per signal (ignored when SBR is ON)" />
+
+          <span class="hint" id="coreRunsHint"></span>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="stopLoss">Stop Loss</label>
+
+          <input id="stopLoss" type="number" min="1" step="0.01" value="10" title="Session Stop Loss (positive number; system uses it as a negative threshold internally)" />
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="takeProfit">Take Profit</label>
+
+          <input id="takeProfit" type="number" min="1" step="0.01" value="20" title="Session Take Profit (positive number)" />
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="identicalCount">Identical Digits (X)</label>
+
+          <input id="identicalCount" type="number" min="2" max="10" step="1" value="3" title="Arm when the last X digits are identical" />
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="bulkToggle">Bulk</label>
+
+          <div class="switch">
+
+            <input id="bulkToggle" type="checkbox" title="Enable parallel purchases per run" />
+
+            <label for="bulkCount" class="sr-only">Bulk Count</label>
+
+            <input id="bulkCount" type="number" min="2" max="10" step="1" value="2" title="Parallel purchases per run (applies in both Core and SBR modes)" />
+
+          </div>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="historyCount">History N</label>
+
+          <input id="historyCount" type="number" min="100" max="5000" step="50" value="1000" title="Number of last ticks used in rolling analysis" />
+
+        </div>
+
+        <div class="lock-note hidden" id="lockNoteB">Locked during execution</div>
+
+      </section>
+
+      <!-- C) SBR Toggle Money Management -->
+
+      <section class="card" aria-labelledby="secC">
+
+        <h2 id="secC">C) SBR Toggle Money Management</h2>
+
+        <div class="row">
+
+          <label class="label" for="toggleEnabled">Enable SBR</label>
+
+          <div class="switch">
+
+            <input id="toggleEnabled" type="checkbox" title="Toggle Smart Burst Recovery mode (overrides Core stake & runs)" />
+
+          </div>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="toggleInitial">Initial Stake</label>
+
+          <input id="toggleInitial" type="number" min="0.35" step="0.01" value="0.50" title="SBR: initial stake per run" />
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="toggleMultiplier">Multiplier</label>
+
+          <input id="toggleMultiplier" type="number" min="1.1" step="0.1" value="2" title="SBR: stake multiplier for one recovery trade after any loss in a burst" />
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="toggleRuns">Burst Runs</label>
+
+          <input id="toggleRuns" type="number" min="1" max="100" step="1" value="3" title="SBR: sequential runs per signal (Core runs ignored)" />
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="autoSwitch">Auto Switch after SBR Recovery</label>
+
+          <div class="switch">
+
+            <input id="autoSwitch" type="checkbox" title="Auto-switch market after a burst uses recovery or after flawless threshold is reached" />
+
+          </div>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="randomMarket">Random Selection</label>
+
+          <div class="switch">
+
+            <input id="randomMarket" type="checkbox" title="Randomly choose among the sequence when switching" />
+
+          </div>
+
+        </div>
+
+        <div class="row">
+
+          <label class="label" for="toggleMarketPicker">Sequence Picker</label>
+
+          <div class="actions row">
+
+            <button id="toggleMarketPicker" class="btn" title="Show/hide market sequence checklist">Show/Hide</button>
+
+            <button id="clearMarketAlt" class="btn ghost" title="Clear selected sequence">Clear</button>
+
+          </div>
+
+        </div>
+
+        <div id="marketPicker" class="market-picker hidden" role="group" aria-label="Market sequence checklist"></div>
+
+        <div class="alt-preview" id="selectedAltPreview">Sequence: —</div>
+
+        <div class="row">
+
+          <label class="label" for="sbrFlawlessPhases">Flawless Phases</label>
+
+          <input id="sbrFlawlessPhases" type="number" min="1" max="100" step="1" value="2" title="Auto-switch after this many flawless (no-loss) SBR phases" />
+
+        </div>
+
+        <div class="lock-note hidden" id="lockNoteC">Locked during execution</div>
+
+      </section>
 
     </div>
 
-    <div class="shift-cta" id="shiftCta">Shifting in <span id="shiftCountdown">10</span>s…</div>
+    <!-- D) Live Analysis -->
 
-  </div>
+    <section class="card" aria-labelledby="secD">
 
-</div>
+      <h2 id="secD">D) Live Analysis</h2>
 
-<!-- Toasts -->
+      <div class="kpis">
 
-<div id="toastHost" class="toast-host"></div>
+        <div class="kpi"><span class="kpi-label">Last Price</span><span id="lastPrice" class="kpi-value">—</span></div>
+
+        <div class="kpi"><span class="kpi-label">Prediction</span><span id="prediction" class="kpi-value">—</span></div>
+
+      </div>
+
+      <div class="chips" aria-label="Status chips">
+
+        <span id="armedStatus" class="chip">Armed?: No</span>
+
+        <span id="armedDigit" class="chip">Armed Digit: —</span>
+
+        <span id="signalState" class="chip">Signal State: Idle</span>
+
+        <span id="execMode" class="chip">Exec Mode: Analysis</span>
+
+      </div>
+
+      <div class="chips" aria-label="Frequency ignore hints">
+
+        <span id="mostFreq" class="chip">Top1: —</span>
+
+        <span id="secondFreq" class="chip">Top2: —</span>
+
+        <span id="leastFreq" class="chip">Low1: —</span>
+
+        <span id="secondLeastFreq" class="chip">Low2: —</span>
+
+      </div>
+
+      <div class="row">
+
+        <div class="label">Last 7 Digits</div>
+
+        <div id="digitStrip" class="digit-strip" aria-label="Last seven digit stream"></div>
+
+      </div>
+
+      <div class="distribution" id="distributionPanel" aria-label="Digit distribution 0 to 9"></div>
+
+    </section>
+
+    <!-- E) Controls -->
+
+    <section class="card" aria-labelledby="secE">
+
+      <h2 id="secE">E) Controls</h2>
+
+      <div class="actions row">
+
+        <button id="startBtn" class="btn success" title="Start trading gate (execution begins on next valid trigger)">Start</button>
+
+        <button id="stopBtn" class="btn warn" title="Stop after current execution block">Stop</button>
+
+        <button id="clearLog" class="btn danger" title="Clear log output">Clear Log</button>
+
+      </div>
+
+    </section>
+
+    <!-- F) Live Log -->
+
+    <section class="card" aria-labelledby="secF">
+
+      <h2 id="secF">F) Live Log</h2>
+
+      <div id="logArea" class="log" role="log" aria-live="polite" aria-atomic="false"></div>
+
+    </section>
+
+  </main>
+
+  <script src="bot.js"></script>
+
+</body>
+
+</html>
 <!-- partial -->
   <script  src="./script.js"></script>
 

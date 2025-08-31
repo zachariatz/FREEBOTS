@@ -1,842 +1,2177 @@
-/* =========================================================================
-   MD+ RISKTAKER PRO BOT — Fast reliable sequential buys with micro-delay
-   - Full replacement JS
-   - For each of X trades: proposal -> buy (await responses) -> immediate next
-   - Minimal micro-delay between buys (default 8ms) to avoid race conditions
-   - Settlements handled asynchronously via proposal_open_contract
-   - Blind-phase & market-shift logic preserved
-   ========================================================================= */
+// bot.js
+
+/* M/D PREMIER RISKTAKER.tz AI SUPER BOT — Finalized JS
+
+ * Vanilla JS (IIFE), Deriv WS v3 (app_id=97447)
+
+ * Fixes per user request:
+
+ *  - Arming banner persists through Armed→Reappearance→Breakout→Executing; it ONLY fades
+
+ *    after all (X) trades complete, right before the 5s/10s phase summary.
+
+ *  - Strict two-stage signal: NEVER treat the arming tick as reappearance. Countdown
+
+ *    ticks (6→0) decrement ONLY on non-D ticks AFTER arming and BEFORE reappearance.
+
+ *    If D reappears on or before the 6th tick, it’s valid; then wait for the first
+
+ *    non-D “breakout” to execute. Otherwise invalidate at 0 and return to analysis.
+
+ *  - No random countdown: countdown is driven purely by qualifying ticks (non-D pre-reappearance).
+
+ *  - Inputs: sanitize on change/use only (no mid-typing autocorrect).
+
+ *  - Full V2 flow, extremes guard at arming and trigger, UI locks, SBR flows, bulk buys.
+
+ */
 
 (() => {
+
   "use strict";
 
-  // --- Internal WS (kept out of UI) ---
-  const WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=97447";
+  /** ----------------------------- Header offset ------------------------- */
 
-  // --- Markets & decimal mapping ---
-  const MARKETS = [
-    { sym: "1HZ10V",  name: "VOLATILITY 10 (1S) INDEX",  decimals: 2 },
-    { sym: "R_10",    name: "VOLATILITY 10 INDEX",       decimals: 3 },
-    { sym: "1HZ15V",  name: "VOLATILITY 15 (1S) INDEX",  decimals: 3 },
-    { sym: "1HZ25V",  name: "VOLATILITY 25 (1S) INDEX",  decimals: 2 },
-    { sym: "R_25",    name: "VOLATILITY 25 INDEX",       decimals: 3 },
-    { sym: "1HZ30V",  name: "VOLATILITY 30 (1S) INDEX",  decimals: 3 },
-    { sym: "1HZ50V",  name: "VOLATILITY 50 (1S) INDEX",  decimals: 2 },
-    { sym: "R_50",    name: "VOLATILITY 50 INDEX",       decimals: 4 },
-    { sym: "1HZ75V",  name: "VOLATILITY 75 (1S) INDEX",  decimals: 2 },
-    { sym: "R_75",    name: "VOLATILITY 75 INDEX",       decimals: 4 },
-    { sym: "1HZ90V",  name: "VOLATILITY 90 (1S) INDEX",  decimals: 3 },
-    { sym: "1HZ100V", name: "VOLATILITY 100 (1S) INDEX", decimals: 2 },
-    { sym: "R_100",   name: "VOLATILITY 100 INDEX",      decimals: 2 }
-  ];
-  const findMarketMeta = (sym) => MARKETS.find(m => m.sym === sym) || { sym, name: sym, decimals: 2 };
+  const header = document.getElementById('appHeader');
 
-  // --- DOM helpers & elements (assumes HTML has these IDs) ---
-  const $ = sel => document.querySelector(sel);
-  const logEl = $("#log");
-  const last7El = $("#last7");
-  const distGrid = $("#distGrid");
-  const nWindowEl = $("#nWindow");
-  const pnlVal = $("#pnlVal");
-  const pnlCcy = $("#pnlCcy");
-  const cycleInfo = $("#cycleInfo");
-  const connDot = $("#connDot");
-  const connText = $("#connText");
-  const balanceVal = $("#balanceVal");
-  const balanceCcy = $("#balanceCcy");
-  const marketName = $("#marketName");
-  const toastHost = $("#toastHost");
-  const armedOverlay = $("#armedOverlay");
-  const armedDigitEl = $("#armedDigit");
-  const shiftOverlay = $("#shiftOverlay");
-  const shiftCountdown = $("#shiftCountdown");
-  const sumMarket = $("#sumMarket");
-  const sumTimeframe = $("#sumTimeframe");
-  const sumSignals = $("#sumSignals");
-  const sumTrades = $("#sumTrades");
-  const sumWL = $("#sumWL");
-  const sumPL = $("#sumPL");
-  const sumAvgStake = $("#sumAvgStake");
-  const sumIgnored = $("#sumIgnored");
-  const sumNext = $("#sumNext");
-  const shiftTitle = $("#shiftTitle");
+  const contentRoot = document.documentElement;
 
-  const nowTs = () => new Date().toLocaleTimeString([], { hour12: false });
+  function adjustHeaderOffset(){
 
-  function uiLog(msg, ctx = "") {
-    try {
-      const line = document.createElement("div");
-      line.className = "log-line";
-      line.innerHTML = `<span class="log-ts">[${nowTs()}]</span> <span class="log-ctx">${ctx}</span> ${msg}`;
-      if (logEl) logEl.prepend(line);
-    } catch (e) { /* ignore UI errors */ }
+    const h = header?.offsetHeight || 0;
+
+    contentRoot.style.setProperty('--header-h', `${h}px`);
+
   }
 
-  function setStatus(state, text) {
-    if (!connDot || !connText) return;
-    connDot.classList.remove("ok", "warn", "err");
-    if (state === "ok") connDot.classList.add("ok");
-    else if (state === "warn") connDot.classList.add("warn");
-    else if (state === "err") connDot.classList.add("err");
-    connText.textContent = text;
-  }
+  window.addEventListener('load', adjustHeaderOffset, { once:true });
 
-  function toast({ title = "", msg = "", ok = true, long = false, short = false }) {
-    try {
-      if (!toastHost) return;
-      const t = document.createElement("div");
-      t.className = `toast ${ok ? "ok" : "err"}`;
-      t.innerHTML = `<div class="t">${title}</div><div class="m">${msg}</div>`;
-      toastHost.appendChild(t);
-      setTimeout(() => {
-        t.style.opacity = "0";
-        setTimeout(() => t.remove(), 220);
-      }, long ? 3500 : (short ? 600 : 1600));
-    } catch (e) { /* ignore */ }
-  }
+  window.addEventListener('resize', adjustHeaderOffset);
 
-  function showArmedOverlay(digit) {
-    try {
-      if (!armedOverlay) return;
-      armedDigitEl.textContent = String(digit);
-      armedOverlay.classList.remove("hidden");
-    } catch (e) { /* ignore */ }
-  }
-  function hideArmedOverlay() {
-    try { if (!armedOverlay) return; armedOverlay.classList.add("hidden"); } catch (e) { /* ignore */ }
-  }
+  window.addEventListener('orientationchange', adjustHeaderOffset);
 
-  async function showShiftOverlay(summary, seconds = 10) {
-    try {
-      if (!shiftOverlay) return;
-      sumMarket.textContent = summary.market;
-      sumTimeframe.textContent = summary.timeframe;
-      sumSignals.textContent = summary.signals;
-      sumTrades.textContent = summary.trades;
-      sumWL.textContent = `${summary.wins} / ${summary.losses}`;
-      sumPL.textContent = `${summary.net_pl.toFixed(2)} ${summary.ccy || ""}`;
-      sumAvgStake.textContent = summary.avg_stake ? `${summary.avg_stake.toFixed(2)} ${summary.ccy || ""}` : "—";
-      sumIgnored.textContent = summary.ignored;
-      sumNext.textContent = summary.nextMarket || "—";
-      shiftTitle.textContent = `Market Summary — ${summary.market}`;
+  if (window.ResizeObserver && header) new ResizeObserver(adjustHeaderOffset).observe(header);
 
-      shiftOverlay.classList.remove("hidden");
-      for (let s = seconds; s >= 1; s--) {
-        shiftCountdown.textContent = String(s);
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise(r => setTimeout(r, 1000));
+  /** ----------------------------- Dynamic CSS for upgraded arming panel - */
+
+  (function injectDynamicStyles(){
+
+    const css = `
+
+    .arming-banner { opacity:1; transition:opacity .25s ease, transform .25s ease }
+
+    .arming-banner.big .arming-content{
+
+      margin:10px auto; width:min(900px,96vw);
+
+      background:linear-gradient(180deg,#0c131b,#0a1118);
+
+      border:2px solid #2a4a6a; border-radius:16px; box-shadow:0 20px 40px rgba(0,0,0,.45);
+
+      padding:10px 12px;
+
+    }
+
+    .arming-banner.big .arming-title{
+
+      font-size:16px; letter-spacing:.4px; color:#d7e8ff;
+
+      text-align:center; margin:2px 0 6px 0;
+
+    }
+
+    .arming-status{
+
+      display:flex; justify-content:center; gap:10px; margin:4px 0 8px; color:#9dc6ff; font-weight:700
+
+    }
+
+    .arming-status .state-dot{ width:10px; height:10px; border-radius:50%; background:#30465d; align-self:center }
+
+    .arming-status[data-state="armed"] .state-dot{ background:#7a661f }
+
+    .arming-status[data-state="reapp"] .state-dot{ background:#2ee6a6 }
+
+    .arming-status[data-state="executing"] .state-dot{ background:#4aa8ff }
+
+    .arming-status[data-state="invalid"] .state-dot{ background:#ff4d4d }
+
+    .arming-row{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px }
+
+    .arming-cta{ display:flex; align-items:center; gap:12px }
+
+    .arming-window{
+
+      min-width:72px; text-align:center; font-weight:800; color:#ffe38a;
+
+      border:1px solid #3e5770; padding:6px 10px; border-radius:10px; background:#0f1a24;
+
+    }
+
+    .arming-window[data-mode="off"]{ color:#9fb7d1; opacity:.9 }
+
+    .arming-feed{ flex:1; display:flex; justify-content:flex-end; gap:6px; flex-wrap:nowrap; overflow:hidden }
+
+    .arming-chip{
+
+      min-width:28px; height:28px; border-radius:8px;
+
+      display:flex; align-items:center; justify-content:center;
+
+      font-weight:800; background:#101a24; border:1px solid #2a3c50; color:#b7cbe0;
+
+    }
+
+    .arming-chip.hot{ background:#0f2b1f; border-color:#2ee6a6; color:#bfffe8 }
+
+    .arming-chip.exec{ background:#10202e; border-color:#4aa8ff; color:#cfe7ff }
+
+    .arming-banner.fade-out{ opacity:0; transform:translateY(-6px) }`;
+
+    const style = document.createElement('style');
+
+    style.id = 'dynamicStyles';
+
+    style.textContent = css;
+
+    document.head.appendChild(style);
+
+  })();
+
+  /** ----------------------------- Helpers ------------------------------- */
+
+  const $ = id => document.getElementById(id);
+
+  const nowTs = () => new Date().toLocaleTimeString();
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+  const fmt2 = n => Number(n).toFixed(2);
+
+  const jitter = (base=120, spread=120) => base + Math.floor(Math.random()*spread);
+
+  const numOr = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+
+  const posOr = (v, d) => { const n = numOr(v, d); return n > 0 ? n : d; };
+
+  /** ----------------------------- Logger -------------------------------- */
+
+  const Logger = (() => {
+
+    const area = $('logArea');
+
+    const line = (cls, msg) => {
+
+      const el = document.createElement('div');
+
+      el.className = cls;
+
+      el.textContent = `[${nowTs()}] ${msg}`;
+
+      area.appendChild(el);
+
+      area.scrollTop = area.scrollHeight;
+
+    };
+
+    return {
+
+      ok: msg => line('ok', msg),
+
+      warn: msg => line('warn', msg),
+
+      err: msg => line('err', msg),
+
+      info: msg => line('', msg),
+
+      clear: () => (area.textContent = '')
+
+    };
+
+  })();
+
+  /** ----------------------------- Notifier ------------------------------ */
+
+  const Notifier = (() => {
+
+    const layer = $('notificationLayer');
+
+    const sOverlay = $('summaryOverlay');
+
+    const sTitle = $('summaryTitle');
+
+    const sBody = $('summaryBody');
+
+    const sCount = $('summaryCountdown');
+
+    const armingBanner = $('armingBanner');
+
+    const armingTitle = $('armingTitle');
+
+    const armingDigits = $('armingDigits');
+
+    const armingWindow = $('armingWindow');
+
+    function toast(msg, type='ok', ttlMs=3500){
+
+      const t = document.createElement('div');
+
+      t.className = `toast ${type}`;
+
+      t.textContent = msg;
+
+      layer.appendChild(t);
+
+      setTimeout(()=>{ t.style.opacity='0'; t.style.transform='translateY(6px)'; }, Math.max(500, ttlMs-250));
+
+      setTimeout(()=> { if (t.parentNode) layer.removeChild(t); }, ttlMs);
+
+    }
+
+    async function summary({title, html, seconds=5}){
+
+      sTitle.textContent = title;
+
+      sBody.innerHTML = html;
+
+      sCount.textContent = String(seconds);
+
+      sOverlay.classList.remove('hidden');
+
+      for(let s=seconds; s>0; s--){
+
+        sCount.textContent = String(s);
+
+        await sleep(1000);
+
       }
-      shiftOverlay.classList.add("hidden");
-      toast({ title: "Shifting market", msg: `Now shifting to volatility: ${summary.nextMarket}`, ok: true });
-    } catch (e) { /* ignore */ }
-  }
 
-  function renderLast7(arr) {
-    try {
-      if (!last7El) return;
-      last7El.innerHTML = "";
-      const slice = arr.slice(-7);
-      if (slice.length === 0) { last7El.innerHTML = `<div class="digit-chip">—</div>`; return; }
-      slice.forEach(d => {
-        const chip = document.createElement("div");
-        chip.className = "digit-chip pop";
-        chip.textContent = String(d);
-        last7El.appendChild(chip);
+      sOverlay.classList.add('hidden');
+
+    }
+
+    function ensureStatus(){
+
+      let band = armingBanner.querySelector('.arming-status');
+
+      if(!band){
+
+        band = document.createElement('div');
+
+        band.className = 'arming-status';
+
+        const dot = document.createElement('div'); dot.className = 'state-dot';
+
+        const label = document.createElement('div'); label.className = 'state-label'; label.textContent = '';
+
+        band.appendChild(dot); band.appendChild(label);
+
+        armingBanner.querySelector('.arming-content').prepend(band);
+
+      }
+
+      return band;
+
+    }
+
+    function setStatus(state){
+
+      const band = ensureStatus();
+
+      band.dataset.state = state;
+
+      const label = band.querySelector('.state-label');
+
+      if(state==='armed') label.textContent = 'Armed — awaiting reappearance';
+
+      if(state==='reapp') label.textContent = 'Reappearance detected — waiting for breakout';
+
+      if(state==='executing') label.textContent = 'Executing…';
+
+      if(state==='invalid') label.textContent = 'Invalidated — returning to analysis';
+
+    }
+
+    function showArming(digit, windowLeft){
+
+      armingTitle.textContent = `Armed with ${digit} — scanning for reappearance`;
+
+      armingWindow.dataset.mode = 'count';
+
+      armingWindow.textContent = String(windowLeft);
+
+      armingDigits.innerHTML = '';
+
+      armingBanner.classList.add('big');
+
+      setStatus('armed');
+
+      armingBanner.classList.remove('hidden','fade-out');
+
+    }
+
+    function updateArming({digit, windowLeft, stream, mode}){
+
+      if(armingBanner.classList.contains('hidden')) return;
+
+      if(mode === 'count'){
+
+        armingWindow.dataset.mode = 'count';
+
+        armingWindow.textContent = String(windowLeft);
+
+      }else{
+
+        armingWindow.dataset.mode = 'off';
+
+        armingWindow.textContent = '—';
+
+      }
+
+      armingTitle.textContent = (mode==='exec')
+
+        ? `Executing on ${digit} — live ticks`
+
+        : `Armed with ${digit} — scanning for reappearance`;
+
+      armingDigits.innerHTML = '';
+
+      stream.slice(-7).forEach(v => {
+
+        const chip = document.createElement('div');
+
+        chip.className = 'arming-chip' + (v===digit ? ' hot':'') + (mode==='exec' ? ' exec':'');
+
+        chip.textContent = (v===0 || v===0?0:v) ?? '—';
+
+        chip.textContent = (v===0 || (typeof v==='number')) ? String(v) : '—';
+
+        armingDigits.appendChild(chip);
+
       });
-    } catch (e) { /* ignore */ }
-  }
 
-  function renderDistribution(counts, total) {
-    try {
-      if (!distGrid) return;
-      distGrid.innerHTML = "";
-      for (let d = 0; d <= 9; d++) {
-        const cnt = counts[d] || 0;
-        const pct = total > 0 ? (cnt / total) * 100 : 0;
-        const cell = document.createElement("div");
-        cell.className = "dist-cell";
-        cell.innerHTML = `
-          <div class="d">${d}</div>
-          <div class="bar"><span style="width:${pct.toFixed(2)}%"></span></div>
-          <div class="pct">${pct.toFixed(2)}%</div>
-          <div class="cnt">${cnt}</div>
-        `;
-        distGrid.appendChild(cell);
-      }
-    } catch (e) { /* ignore */ }
-  }
-
-  // --- Digit extraction according to decimals mapping ---
-  function extractDigit(quoteStr, symbol) {
-    const meta = findMarketMeta(symbol);
-    const d = meta.decimals || 2;
-    const s = String(quoteStr);
-    const dot = s.indexOf(".");
-    let decimals = dot >= 0 ? s.slice(dot + 1) : "";
-    if (decimals.length < d) decimals = decimals.padEnd(d, "0");
-    const ch = decimals.charAt(d - 1) || "0";
-    return parseInt(ch, 10);
-  }
-
-  // --- Deriv minimal WebSocket wrapper ---
-  class DerivWS {
-    constructor() {
-      this.ws = null;
-      this.req = 1;
-      this.pending = new Map();
-      this.listeners = {};
-      this.connected = false;
     }
 
-    connect() {
-      return new Promise((resolve, reject) => {
-        try { this.ws = new WebSocket(WS_URL); } catch (err) { reject(err); return; }
-        this.ws.onopen = () => { this.connected = true; resolve(); };
-        this.ws.onmessage = (ev) => this._onMessage(ev);
-        this.ws.onerror = (e) => { this.connected = false; reject(e); };
-        this.ws.onclose = () => {
-          this.connected = false;
-          setStatus("err", "Disconnected");
-          uiLog("WebSocket closed.", "WS");
-        };
+    function markReappearance(digit){
+
+      setStatus('reapp');
+
+      toast(`Reappearance detected for ${digit}.`, 'ok', 1200);
+
+    }
+
+    function markExecuting(digit){
+
+      setStatus('executing');
+
+      updateArming({ digit, windowLeft: '—', stream: State.v2.stream, mode: 'exec' });
+
+    }
+
+    function markInvalid(){
+
+      setStatus('invalid');
+
+    }
+
+    function fadeOutArmingQuick(){
+
+      armingBanner.classList.add('fade-out');
+
+      setTimeout(()=> hideArming(), 260);
+
+    }
+
+    function hideArming(){
+
+      armingBanner.classList.add('hidden');
+
+      armingDigits.innerHTML = '';
+
+      armingBanner.classList.remove('fade-out');
+
+      armingWindow.dataset.mode = 'off';
+
+      armingWindow.textContent = '—';
+
+    }
+
+    return { toast, summary, showArming, updateArming, markReappearance, markExecuting, markInvalid, fadeOutArmingQuick, hideArming };
+
+  })();
+
+  /** ----------------------------- UI Renderer --------------------------- */
+
+  const UI = (() => {
+
+    const distBars = new Array(10).fill(null).map(()=>({row:null,bar:null,pct:null}));
+
+    (function initDistribution(){
+
+      const panel = $('distributionPanel');
+
+      panel.innerHTML = '';
+
+      for(let d=0; d<=9; d++){
+
+        const row = document.createElement('div'); row.className='dist-row';
+
+        const lbl = document.createElement('div'); lbl.className='dist-label'; lbl.textContent=String(d);
+
+        const wrap = document.createElement('div'); wrap.className='dist-bar-wrap';
+
+        const bar = document.createElement('div'); bar.className='dist-bar';
+
+        const pct = document.createElement('div'); pct.className='dist-pct'; pct.textContent='0%';
+
+        wrap.appendChild(bar);
+
+        row.appendChild(lbl); row.appendChild(wrap); row.appendChild(pct);
+
+        panel.appendChild(row);
+
+        distBars[d] = { row, bar, pct };
+
+      }
+
+    })();
+
+    function setBadge(id, text){ $(id).textContent = text; }
+
+    function setChip(id, text, extraClass){
+
+      const el = $(id); el.textContent = text;
+
+      el.classList.remove('active','executing','exec');
+
+      if(extraClass) el.classList.add(extraClass);
+
+    }
+
+    function setDigitStrip(digits, identicalX){
+
+      const strip = $('digitStrip');
+
+      strip.innerHTML = '';
+
+      const highlight = (arr => {
+
+        if(arr.length < 2) return false;
+
+        const last = arr[arr.length-1];
+
+        let k=1;
+
+        for(let i=arr.length-2;i>=0 && k<identicalX;i--){
+
+          if(arr[i]===last) k++; else break;
+
+        }
+
+        return k>=identicalX ? {digit:last, len:k} : false;
+
+      })(digits);
+
+      const tail = digits.slice(-7);
+
+      tail.forEach((d, idx) => {
+
+        const box = document.createElement('div');
+
+        box.className='digit-box';
+
+        box.textContent = (d===0 || typeof d==='number') ? String(d) : '—';
+
+        if(highlight && d===highlight.digit && idx >= tail.length - highlight.len){
+
+          box.classList.add('highlight');
+
+        }
+
+        strip.appendChild(box);
+
       });
+
     }
 
-    _onMessage(ev) {
-      let data;
-      try { data = JSON.parse(ev.data); } catch (e) { return; }
-      if (typeof data.req_id !== "undefined" && this.pending.has(data.req_id)) {
-        const p = this.pending.get(data.req_id);
-        this.pending.delete(data.req_id);
-        if (data.error) p.reject(data); else p.resolve(data);
+    function setDistribution(dist, total){
+
+      for(let d=0; d<=9; d++){
+
+        const c = dist[d] || 0;
+
+        const pct = total>0 ? (c*100/total) : 0;
+
+        distBars[d].bar.style.width = `${pct}%`;
+
+        distBars[d].pct.textContent = `${pct.toFixed(1)}%`;
+
       }
-      if (data.msg_type) {
-        const set = this.listeners[data.msg_type];
-        if (set) for (const fn of set) { try { fn(data); } catch (_) { } }
-      }
-      if (this.listeners["message"]) for (const fn of this.listeners["message"]) try { fn(data); } catch (_) { }
-      if (data.error) uiLog(`<b>API Error:</b> ${data.error.code} — ${data.error.message}`, "API");
+
     }
 
-    on(msg_type, fn) {
-      this.listeners[msg_type] ??= new Set();
-      this.listeners[msg_type].add(fn);
-      return () => this.listeners[msg_type].delete(fn);
+    function setIgnoreChips(info){
+
+      $('mostFreq').textContent = info.top1 ? `Top1: ${info.top1[0]} (${info.top1[1].toFixed(1)}%)` : 'Top1: —';
+
+      $('secondFreq').textContent = info.top2 ? `Top2: ${info.top2[0]} (${info.top2[1].toFixed(1)}%)` : 'Top2: —';
+
+      $('leastFreq').textContent = info.low1 ? `Low1: ${info.low1[0]} (${info.low1[1].toFixed(1)}%)` : 'Low1: —';
+
+      $('secondLeastFreq').textContent = info.low2 ? `Low2: ${info.low2[0]} (${info.low2[1].toFixed(1)}%)` : 'Low2: —';
+
     }
 
-    send(payload) {
-      if (!this.connected) return Promise.reject(new Error("WS not connected"));
-      const req_id = this.req++;
-      const withId = Object.assign({ req_id }, payload);
-      try { this.ws.send(JSON.stringify(withId)); } catch (e) { return Promise.reject(e); }
-      const p = new Promise((resolve, reject) => {
-        const t = setTimeout(() => {
-          if (this.pending.has(req_id)) { this.pending.delete(req_id); reject(new Error("Request timeout")); }
-        }, 12000);
-        this.pending.set(req_id, {
-          resolve: (d) => { clearTimeout(t); resolve(d); },
-          reject: (d) => { clearTimeout(t); reject(d); }
-        });
+    function buildMarketPicker(options){
+
+      const wrap = $('marketPicker');
+
+      wrap.innerHTML = '';
+
+      options.forEach(({value,label,checked})=>{
+
+        const pill = document.createElement('label');
+
+        pill.className='market-pill';
+
+        const cb = document.createElement('input'); cb.type='checkbox'; cb.value=value; cb.checked=checked||false;
+
+        const span = document.createElement('span'); span.textContent = label;
+
+        pill.appendChild(cb); pill.appendChild(span);
+
+        wrap.appendChild(pill);
+
       });
-      return p;
+
     }
 
-    close() { try { this.ws?.close(); } catch (_) { } this.connected = false; }
+    function getMarketPickerSelection(){
+
+      return Array.from($('marketPicker').querySelectorAll('input[type=checkbox]'))
+
+        .filter(cb=>cb.checked).map(cb=>cb.value);
+
+    }
+
+    function previewAltSequence(markets){
+
+      $('selectedAltPreview').textContent = markets.length ? `Sequence: ${markets.join(' → ')}` : 'Sequence: —';
+
+    }
+
+    return {
+
+      setBadge, setChip, setDigitStrip, setDistribution, setIgnoreChips,
+
+      buildMarketPicker, getMarketPickerSelection, previewAltSequence
+
+    };
+
+  })();
+
+  /** ----------------------------- State --------------------------------- */
+
+  const State = {
+
+    ws: null,
+
+    authorized: false,
+
+    accountId: null,
+
+    balance: 0,
+
+    sessionPL: 0,
+
+    market: $('marketSelect').value,
+
+    contractType: $('contractType').value,
+
+    tickSubId: null,
+
+    balanceSubId: null,
+
+    historyN: Number($('historyCount').value),
+
+    digitsRolling: [],
+
+    distribution: Array(10).fill(0),
+
+    lastPrice: null,
+
+    // Start gate & execution locks
+
+    startGate: false,
+
+    execMode: 'Analysis',
+
+    execLock: false,
+
+    stopRequested: false,
+
+    // V2 Signal
+
+    v2: {
+
+      armed: false,
+
+      digit: null,
+
+      windowLeft: 6,       // 6-tick non-D window before invalidation
+
+      reappeared: false,   // becomes true only on a NEW tick after arming
+
+      stream: []           // for banner
+
+    },
+
+    // UI status mirrors
+
+    signalState: 'Idle',
+
+    // SBR & Bulk
+
+    sbr: {
+
+      enabled: $('toggleEnabled').checked,
+
+      initial: numOr($('toggleInitial').value, 0.5),
+
+      multiplier: numOr($('toggleMultiplier').value, 2),
+
+      runs: numOr($('toggleRuns').value, 3),
+
+      flawlessNeeded: numOr($('sbrFlawlessPhases').value, 2),
+
+      flawlessCount: 0,
+
+    },
+
+    bulk: { enabled: $('bulkToggle').checked, count: numOr($('bulkCount').value, 2) },
+
+    // Debounce
+
+    debounceTimers: new Map(),
+
+    // Auto-switch sequence
+
+    marketSequence: [],
+
+    // Session
+
+    session: {
+
+      active: false,
+
+      startBalance: 0,
+
+      startTime: null,
+
+      trades: 0,
+
+      wins: 0,
+
+      losses: 0,
+
+      phases: 0,
+
+      sbrRecoveries: 0,
+
+      markets: new Set()
+
+    }
+
+  };
+
+  /** ----------------------------- Deriv WS Service ---------------------- */
+
+  const WS = (() => {
+
+    const ENDPOINT = 'wss://ws.derivws.com/websockets/v3?app_id=97447';
+
+    let ws=null, openP=null, msgId=1;
+
+    const pending = new Map(); // req_id -> {resolve,reject}
+
+    const handlers = new Map(); // msg_type -> Set<fn>
+
+    function connect(){
+
+      if(ws && (ws.readyState===WebSocket.OPEN || ws.readyState===WebSocket.CONNECTING)) return openP;
+
+      ws = new WebSocket(ENDPOINT);
+
+      $('connBadge').textContent = 'CONNECTING...';
+
+      openP = new Promise((resolve,reject)=>{
+
+        ws.onopen = () => { $('connBadge').textContent='CONNECTED'; Logger.ok('Connected to Deriv WS'); resolve(true); };
+
+        ws.onerror = (e) => { Logger.err('WebSocket error'); reject(e); };
+
+        ws.onclose = () => { $('connBadge').textContent='DISCONNECTED'; Logger.warn('WebSocket closed'); Notifier.hideArming(); };
+
+      });
+
+      ws.onmessage = evt => {
+
+        let data;
+
+        try{ data = JSON.parse(evt.data); }catch(e){ Logger.err('Invalid WS JSON'); return; }
+
+        if(data.req_id && pending.has(data.req_id)){
+
+          const p = pending.get(data.req_id);
+
+          if(data.error){ p.reject(data.error); } else { p.resolve(data); }
+
+          pending.delete(data.req_id);
+
+        }
+
+        const type = data.msg_type;
+
+        if(type && handlers.has(type)){
+
+          handlers.get(type).forEach(fn => { try{ fn(data); }catch(_){ } });
+
+        }
+
+      };
+
+      return openP;
+
+    }
+
+    function send(payload){
+
+      if(!ws || ws.readyState!==WebSocket.OPEN) throw new Error('WS not open');
+
+      const req_id = msgId++;
+
+      const msg = Object.assign({ req_id }, payload);
+
+      return new Promise((resolve,reject)=>{
+
+        pending.set(req_id, {resolve, reject});
+
+        ws.send(JSON.stringify(msg));
+
+      });
+
+    }
+
+    function on(type, fn){
+
+      if(!handlers.has(type)) handlers.set(type, new Set());
+
+      handlers.get(type).add(fn);
+
+    }
+
+    function off(type, fn){
+
+      if(!handlers.has(type)) return;
+
+      if(fn) handlers.get(type).delete(fn);
+
+      else handlers.delete(type);
+
+    }
+
+    function isOpen(){ return ws && ws.readyState===WebSocket.OPEN; }
+
+    function close(){ try{ ws && ws.close(); }catch(_){} }
+
+    return { connect, send, on, off, isOpen, close };
+
+  })();
+
+  /** ----------------------------- Decimals Map -------------------------- */
+
+  const DECIMALS = {
+
+    '1HZ10V':2, 'R_10':3, '1HZ15V':3, '1HZ25V':2, 'R_25':3, '1HZ30V':3,
+
+    '1HZ50V':2, 'R_50':4, '1HZ75V':2, 'R_75':4, '1HZ90V':3, '1HZ100V':2, 'R_100':2
+
+  };
+
+  function extractDigitFromQuote(symbol, quote){
+
+    const dec = DECIMALS[symbol] ?? 2;
+
+    const s = String(quote);
+
+    const parts = s.split('.');
+
+    const frac = (parts[1] || '');
+
+    const padded = (frac + '0000000000').slice(0, dec);
+
+    const ch = padded[dec-1] || '0';
+
+    const d = Number(ch);
+
+    return (d>=0 && d<=9) ? d : 0;
+
   }
 
-  // --- Per-market state ---
-  class MarketState {
-    constructor(symbol) {
-      this.symbol = symbol;
-      this.name = findMarketMeta(symbol).name;
-      this.n = 1000;
-      this.queue = [];
-      this.counts = Array(10).fill(0);
-      this.last7 = [];
-      this.first_ts = null;
-      this.last_ts = null;
-      this.prevDigit = null;
-      this.runDigit = null;
-      this.runLen = 0;
-      this.signals = 0;
-      this.trades = 0;
-      this.wins = 0;
-      this.losses = 0;
-      this.ignored = 0;
-      this.stakes = [];
+  /** ----------------------------- Tick Engine --------------------------- */
+
+  const TickEngine = (() => {
+
+    async function seedHistory(symbol, count){
+
+      if(!WS.isOpen()) throw new Error('WS not open');
+
+      const resp = await WS.send({ ticks_history: symbol, count, end: "latest", style: "ticks" });
+
+      const prices = (resp.history?.prices || []);
+
+      State.digitsRolling = [];
+
+      State.distribution = Array(10).fill(0);
+
+      prices.forEach(p => {
+
+        const d = extractDigitFromQuote(symbol, p);
+
+        State.digitsRolling.push(d);
+
+        State.distribution[d] += 1;
+
+      });
+
+      State.digitsRolling = State.digitsRolling.slice(-State.historyN);
+
+      UI.setDistribution(State.distribution, State.digitsRolling.length);
+
+      UI.setDigitStrip(State.digitsRolling, Number($('identicalCount').value));
+
+      Logger.ok(`Seeded history N=${count} for ${symbol}`);
+
+      refreshIgnoreChips();
+
     }
 
-    clearData() {
-      this.queue.length = 0;
-      this.counts = Array(10).fill(0);
-      this.last7.length = 0;
-      this.prevDigit = this.runDigit = null;
-      this.runLen = 0;
-      this.first_ts = this.last_ts = null;
-      this.signals = this.trades = this.wins = this.losses = this.ignored = 0;
-      this.stakes = [];
-    }
+    async function subscribeTicks(symbol){
 
-    pushTick(quote, epoch) {
-      const d = extractDigit(quote, this.symbol);
-      this.queue.push(d);
-      this.counts[d] += 1;
-      if (this.queue.length > this.n) {
-        const rm = this.queue.shift();
-        this.counts[rm] -= 1;
+      if(State.tickSubId){
+
+        try{ await WS.send({ forget: State.tickSubId }); Logger.info('Forgot previous tick subscription'); }catch(_){}
+
+        State.tickSubId=null;
+
       }
-      this.last7.push(d);
-      if (this.last7.length > 7) this.last7.shift();
-      if (!this.first_ts) this.first_ts = epoch || Math.floor(Date.now() / 1000);
-      this.last_ts = epoch || Math.floor(Date.now() / 1000);
 
-      if (this.prevDigit === null) {
-        this.prevDigit = d;
-        this.runDigit = d;
-        this.runLen = 1;
-        return null;
-      } else {
-        if (d === this.prevDigit) {
-          this.runLen += 1;
-          return null;
+      WS.off('tick');
+
+      WS.on('tick', onTick);
+
+      const resp = await WS.send({ ticks: symbol, subscribe: 1 });
+
+      const subId = resp.tick?.id || resp.subscription?.id;
+
+      if(subId){ State.tickSubId = subId; $('marketNow').textContent = `Market: ${symbol}`; }
+
+      else Logger.warn('No subscription id for ticks');
+
+    }
+
+    function onTick(msg){
+
+      if(!msg.tick) return;
+
+      const { symbol, quote } = msg.tick;
+
+      State.lastPrice = quote;
+
+      $('lastPrice').textContent = String(quote);
+
+      const d = extractDigitFromQuote(symbol, quote);
+
+      // Update distributions/rolling
+
+      State.digitsRolling.push(d);
+
+      if(State.digitsRolling.length > State.historyN){
+
+        const rem = State.digitsRolling.shift();
+
+        State.distribution[rem] = Math.max(0, State.distribution[rem]-1);
+
+      }
+
+      State.distribution[d] += 1;
+
+      UI.setDistribution(State.distribution, State.digitsRolling.length);
+
+      UI.setDigitStrip(State.digitsRolling, Number($('identicalCount').value));
+
+      refreshIgnoreChips();
+
+      // Update arming live stream
+
+      State.v2.stream.push(d);
+
+      if (State.v2.stream.length > 32) State.v2.stream.shift();
+
+      // Keep banner live during armed/executing
+
+      if(State.v2.armed || State.execMode==='Executing'){
+
+        const A = State.v2.digit;
+
+        const mode = (State.execMode==='Executing') ? 'exec' : (State.v2.reappeared ? 'off' : 'count');
+
+        const windowLeft = (State.v2.reappeared || State.execMode==='Executing') ? '—' : State.v2.windowLeft;
+
+        Notifier.updateArming({ digit: A, windowLeft, stream: State.v2.stream, mode });
+
+      }
+
+      // Drive V2 logic (no fresh triggers during Executing)
+
+      SignalEngine.onNewDigit(d);
+
+    }
+
+    return { seedHistory, subscribeTicks };
+
+  })();
+
+  /** ----------------------------- Distribution & Ignore ----------------- */
+
+  function computeFrequencyInfo(){
+
+    const total = State.digitsRolling.length || 0;
+
+    const freq = Array.from({length:10}, (_,d) => [d, total? (State.distribution[d]*100/total):0]);
+
+    const sorted = [...freq].sort((a,b)=>b[1]-a[1]);
+
+    const top1 = sorted[0] ?? null;
+
+    const top2 = sorted[1] ?? null;
+
+    const lowSorted = [...freq].sort((a,b)=>a[1]-b[1]);
+
+    const low1 = lowSorted[0] ?? null;
+
+    const low2 = lowSorted[1] ?? null;
+
+    return { top1, top2, low1, low2, freqMap: new Map(freq) };
+
+  }
+
+  function inExtremes(d){
+
+    const info = computeFrequencyInfo();
+
+    const ext = [info.top1?.[0], info.top2?.[0], info.low1?.[0], info.low2?.[0]];
+
+    return { blocked: ext.includes(d), info };
+
+  }
+
+  function refreshIgnoreChips(){
+
+    const info = computeFrequencyInfo();
+
+    UI.setIgnoreChips(info);
+
+    $('prediction').textContent = State.v2.armed ? String(State.v2.digit) : '—';
+
+  }
+
+  /** ----------------------------- UI Locks ------------------------------ */
+
+  function setInputsExecutionLocked(locked){
+
+    const coreStake = $('stakeAmount');
+
+    const coreRuns = $('runsPerSignal');
+
+    const contractType = $('contractType');
+
+    const bulkToggle = $('bulkToggle');
+
+    const bulkCount = $('bulkCount');
+
+    const sbrToggle = $('toggleEnabled');
+
+    [coreStake, coreRuns, contractType, bulkToggle, bulkCount, sbrToggle].forEach(el=>{
+
+      el.disabled = !!locked;
+
+      el.setAttribute('aria-disabled', String(!!locked));
+
+    });
+
+    $('lockNoteB').classList.toggle('hidden', !locked);
+
+    $('lockNoteC').classList.toggle('hidden', !locked);
+
+  }
+
+  function enforceSeparationUI(){
+
+    const sbrOn = $('toggleEnabled').checked;
+
+    const coreStake = $('stakeAmount');
+
+    const coreRuns = $('runsPerSignal');
+
+    const hintStake = $('coreStakeHint');
+
+    const hintRuns = $('coreRunsHint');
+
+    if(sbrOn){
+
+      coreStake.readOnly = true; coreStake.setAttribute('aria-disabled','true'); coreStake.classList.add('readonly');
+
+      coreRuns.readOnly = true; coreRuns.setAttribute('aria-disabled','true'); coreRuns.classList.add('readonly');
+
+      hintStake.textContent = 'SBR is ON: Core stake inactive';
+
+      hintRuns.textContent  = 'SBR is ON: Core runs inactive';
+
+    }else{
+
+      coreStake.readOnly = false; coreStake.removeAttribute('aria-disabled'); coreStake.classList.remove('readonly');
+
+      coreRuns.readOnly = false; coreRuns.removeAttribute('aria-disabled'); coreRuns.classList.remove('readonly');
+
+      hintStake.textContent = '';
+
+      hintRuns.textContent  = '';
+
+    }
+
+  }
+
+  /** ----------------------------- Signal Engine (V2 strict) ------------- */
+
+  const SignalEngine = (() => {
+
+    let tail = []; // identical tail tracker
+
+    function reset(){
+
+      State.v2.armed=false; State.v2.digit=null; State.v2.windowLeft=6; State.v2.reappeared=false;
+
+      UI.setChip('armedStatus','Armed?: No');
+
+      UI.setChip('armedDigit','Armed Digit: —');
+
+      UI.setChip('signalState','Signal State: Idle');
+
+      $('prediction').textContent = '—';
+
+      Notifier.hideArming();
+
+      $('toggleEnabled').disabled = false; // permit flipping when not scanning/executing
+
+      tail = [];
+
+    }
+
+    function tryArm(d){
+
+      const X = clamp(numOr($('identicalCount').value,3),2,10);
+
+      // build/extend identical tail
+
+      if(tail.length===0 || tail[tail.length-1]===d) tail.push(d); else tail=[d];
+
+      if(!State.v2.armed && tail.length>=X){
+
+        const { blocked } = inExtremes(d);
+
+        if(blocked){
+
+          Logger.warn(`Arming blocked: digit [${d}] is among extremes.`);
+
+          return false;
+
+        }
+
+        State.v2.armed = true;
+
+        State.v2.digit = d;
+
+        State.v2.windowLeft = 6;
+
+        State.v2.reappeared = false;
+
+        UI.setChip('armedStatus','Armed?: Yes','active');
+
+        UI.setChip('armedDigit',`Armed Digit: ${d}`);
+
+        UI.setChip('signalState','Signal State: Scanning');
+
+        $('prediction').textContent = String(d);
+
+        $('toggleEnabled').disabled = true; // lock SBR toggle while scanning/executing
+
+        Notifier.toast(`Armed with ${d} — scanning for reappearance.`, 'ok', 1600);
+
+        Notifier.showArming(d, State.v2.windowLeft);
+
+        // CRITICAL: do NOT process the arming tick for reappearance. Caller must RETURN.
+
+        return true;
+
+      }
+
+      return false;
+
+    }
+
+    function onNewDigit(d){
+
+      if(State.execMode==='Executing'){
+
+        // Keep banner stream during execution
+
+        if(State.v2.digit!==null){
+
+          Notifier.updateArming({
+
+            digit: State.v2.digit,
+
+            windowLeft: '—',
+
+            stream: State.v2.stream,
+
+            mode:'exec'
+
+          });
+
+        }
+
+        return;
+
+      }
+
+      // Attempt arming. If just armed on THIS tick, exit immediately (no reappearance on same tick).
+
+      const justArmed = tryArm(d);
+
+      if(justArmed){
+
+        Notifier.updateArming({digit: State.v2.digit, windowLeft: State.v2.windowLeft, stream: State.v2.stream, mode:'count'});
+
+        return;
+
+      }
+
+      if(!State.v2.armed) return;
+
+      const A = State.v2.digit;
+
+      // BEFORE reappearance: decrement only on non-A ticks; invalidate exactly at 6 misses.
+
+      if(!State.v2.reappeared){
+
+        if(d === A){
+
+          State.v2.reappeared = true;
+
+          Notifier.markReappearance(A); // switch status; countdown chip will display "—"
+
+          Logger.ok(`Reappearance observed for digit ${A}. Waiting for breakout…`);
+
+          Notifier.updateArming({digit:A, windowLeft:'—', stream: State.v2.stream, mode:'count'});
+
+          return;
+
         } else {
-          const breakout = d;
-          const changed = { breakout, runDigit: this.prevDigit, runLen: this.runLen };
-          this.prevDigit = d;
-          this.runDigit = d;
-          this.runLen = 1;
-          return changed;
-        }
-      }
-    }
 
-    distributionRanks() {
-      const arr = [];
-      for (let i = 0; i <= 9; i++) arr.push({ d: i, c: this.counts[i] });
-      const desc = [...arr].sort((a, b) => b.c - a.c || a.d - b.d);
-      const asc = [...arr].sort((a, b) => a.c - b.c || a.d - b.d);
-      return { desc, asc };
-    }
+          State.v2.windowLeft = Math.max(0, State.v2.windowLeft - 1);
 
-    timeframeStr() {
-      if (!this.first_ts || !this.last_ts) return "—";
-      const a = new Date(this.first_ts * 1000);
-      const b = new Date(this.last_ts * 1000);
-      const fmt = (t) => `${t.toLocaleDateString()} ${t.toLocaleTimeString([], { hour12: false })}`;
-      return `${fmt(a)} → ${fmt(b)}`;
-    }
-  }
+          if(State.v2.windowLeft === 0){
 
-  // --- Main bot ---
-  class RiskTakerBot {
-    constructor() {
-      // UI
-      this.$token = $("#apiToken");
-      this.$connect = $("#btnConnect");
-      this.$start = $("#btnStart");
-      this.$stop = $("#btnStop");
-      this.$stakePct = $("#stakePct");
-      this.$lowTh = $("#lowBalanceThreshold");
-      this.$minRun = $("#minRun");
-      this.$tps = $("#tradesPerSignal");
-      this.$nwin = $("#distN");
-      this.$rotMode = $("#rotationMode");
-      this.$marketSelect = $("#marketSelect");
+            Logger.warn(`Signal invalidated: digit ${A} did not reappear within 6 ticks.`);
 
-      // internals
-      this.deriv = new DerivWS();
-      this.token = null;
-      this.currency = "";
-      this.balance = 0;
-      this.pnl = 0;
+            Notifier.markInvalid();
 
-      // market
-      this.currentSymbol = this.$marketSelect?.value || MARKETS[0].sym;
-      this.marketState = new MarketState(this.currentSymbol);
-      this.marketState.n = parseInt(this.$nwin?.value || "1000", 10);
+            Notifier.fadeOutArmingQuick();
 
-      // subs
-      this.tickSubId = null;
-      this.balanceSubId = null;
-      this._tickUnsub = null;
-      this._balanceUnsub = null;
+            reset();
 
-      // flags
-      this.tradingEnabled = false;
-      this.analyzing = true;
-      this.armedDigit = null;
-      this.cycleInProgress = false;
-      this.isTrading = false;        // while placing proposal+buys
-      this.isShiftingMarket = false; // while overlay+subscribe
-      this.tradesExecutedThisMarket = 0;
+            return;
 
-      // contract tracking
-      this.contractMap = new Map(); // contract_id -> { stake, symbol, barrier, bought_at, symbolState }
-
-      // rotation
-      this.rotationMode = this.$rotMode?.value || "series";
-      this.seriesIdx = MARKETS.findIndex(m => m.sym === this.currentSymbol);
-      if (this.seriesIdx < 0) this.seriesIdx = 0;
-
-      // risk gates
-      this.takeProfit = parseFloat($("#takeProfit")?.value || "999999");
-      this.stopLoss = parseFloat($("#stopLoss")?.value || "999999");
-
-      // micro-delay between trades in milliseconds (tiny)
-      this.microDelayMs = 8;
-
-      // bind UI and listeners
-      this.bindUI();
-      this.setupPocListener();
-      this.renderAll();
-      uiLog("Bot initialized. Connect, then start when ready.", "APP");
-    }
-
-    bindUI() {
-      if (this.$connect) this.$connect.addEventListener("click", () => this.connect());
-      if (this.$start) this.$start.addEventListener("click", () => this.toggleStart(true));
-      if (this.$stop) this.$stop.addEventListener("click", () => this.toggleStart(false));
-      if (this.$marketSelect) this.$marketSelect.addEventListener("change", () => this.changeMarket(this.$marketSelect.value));
-      if (this.$nwin) this.$nwin.addEventListener("change", () => {
-        this.marketState.n = Math.max(25, Math.min(25000, parseInt(this.$nwin.value, 10) || 1000));
-        if (nWindowEl) nWindowEl.textContent = String(this.marketState.n);
-        uiLog(`Distribution window set to N=${this.marketState.n}`, "CFG");
-      });
-      if (this.$rotMode) this.$rotMode.addEventListener("change", () => {
-        this.rotationMode = this.$rotMode.value;
-        uiLog(`Rotation mode: ${this.rotationMode.toUpperCase()}`, "CFG");
-      });
-      const tp = $("#takeProfit");
-      const sl = $("#stopLoss");
-      if (tp) tp.addEventListener("change", e => this.takeProfit = Math.max(0, parseFloat(e.target.value || "0")));
-      if (sl) sl.addEventListener("change", e => this.stopLoss = Math.max(0, parseFloat(e.target.value || "0")));
-    }
-
-    setupPocListener() {
-      // handle asynchronous settlement updates
-      this.deriv.on("proposal_open_contract", (data) => {
-        const poc = data?.proposal_open_contract;
-        if (!poc) return;
-        const cid = poc.contract_id;
-        if (!cid) return;
-        if (!this.contractMap.has(cid)) return; // unknown contract
-        if (poc.is_sold) {
-          const entry = this.contractMap.get(cid);
-          const payout = typeof poc.payout === "number" ? poc.payout : parseFloat(poc.payout || "0");
-          const profit = typeof poc.profit === "number" ? poc.profit : parseFloat(poc.profit || "0");
-          if (profit > 0) entry.symbolState.wins += 1; else entry.symbolState.losses += 1;
-          this.pnl += profit;
-          if (pnlVal) pnlVal.textContent = this.pnl.toFixed(2);
-          const title = profit > 0 ? `WIN +${profit.toFixed(2)} ${this.currency}` : `LOSS ${profit.toFixed(2)} ${this.currency}`;
-          toast({ title, msg: `${entry.symbol} • barrier ${entry.barrier}`, ok: profit > 0, short: true });
-          uiLog(`${profit > 0 ? "WIN" : "LOSS"} ${profit.toFixed(2)} • contract ${cid} • stake ${entry.stake.toFixed(2)}`, "SETTLE");
-          this.contractMap.delete(cid);
-        }
-      });
-    }
-
-    async connect() {
-      try {
-        setStatus("warn", "Connecting…");
-        await this.deriv.connect();
-        setStatus("ok", "Connected");
-        uiLog("WebSocket connected.", "WS");
-      } catch (e) {
-        setStatus("err", "Connection failed");
-        uiLog("Failed to connect to WebSocket.", "WS");
-        toast({ title: "Connection failed", msg: String(e?.message || e), ok: false });
-        return;
-      }
-
-      const tok = (this.$token?.value || "").trim();
-      if (!tok) { toast({ title: "Token required", msg: "Please enter your Deriv API token.", ok: false }); return; }
-      this.token = tok;
-      try {
-        const authResp = await this.deriv.send({ authorize: this.token });
-        if (authResp.error) throw authResp;
-        setStatus("ok", "Authorized");
-        uiLog("Authorized with token.", "AUTH");
-        this.currency = authResp?.authorize?.currency || this.currency || "";
-        if (pnlCcy) pnlCcy.textContent = this.currency ? ` ${this.currency}` : "";
-        await this.subscribeBalance();
-        await this.subscribeMarket(this.currentSymbol, { initial: true });
-        toast({ title: "Ready", msg: "Streams active. Click Start to enable trading." });
-      } catch (e) {
-        setStatus("err", "Auth failed");
-        toast({ title: "Auth failed", msg: String(e?.error?.message || e?.message || "Invalid token"), ok: false, long: true });
-        uiLog("Authorization failed.", "AUTH");
-      }
-    }
-
-    async subscribeBalance() {
-      if (this._balanceUnsub) { try { this._balanceUnsub(); } catch (_) { } this._balanceUnsub = null; }
-      this._balanceUnsub = this.deriv.on("balance", (d) => {
-        const b = d?.balance;
-        if (!b) return;
-        const bal = typeof b.balance === "number" ? b.balance : parseFloat(b.balance || "0");
-        this.balance = bal;
-        if (balanceVal) balanceVal.textContent = bal.toFixed(2);
-        if (b.currency) {
-          this.currency = b.currency;
-          if (balanceCcy) balanceCcy.textContent = this.currency;
-          if (pnlCcy) pnlCcy.textContent = this.currency ? ` ${this.currency}` : "";
-        }
-      });
-      try {
-        const res = await this.deriv.send({ balance: 1, subscribe: 1 });
-        this.balanceSubId = res?.subscription?.id || null;
-        uiLog("Subscribed to account balance.", "BAL");
-      } catch (e) { uiLog("Balance subscription failed.", "BAL"); }
-    }
-
-    async subscribeMarket(symbol, { initial = false } = {}) {
-      // remove tick listener if present
-      if (this._tickUnsub) { try { this._tickUnsub(); } catch (_) { } this._tickUnsub = null; }
-      try { await this.forgetAll("ticks"); } catch (_) { }
-      this.tickSubId = null;
-
-      this.currentSymbol = symbol;
-      this.marketState = new MarketState(symbol);
-      this.marketState.n = Math.max(25, Math.min(25000, parseInt(this.$nwin?.value || "1000", 10) || 1000));
-      if (nWindowEl) nWindowEl.textContent = String(this.marketState.n);
-      if (marketName) marketName.textContent = `${findMarketMeta(symbol).sym} – ${findMarketMeta(symbol).name}`;
-
-      // history
-      const N = this.marketState.n;
-      try {
-        const hist = await this.deriv.send({
-          ticks_history: symbol,
-          count: N,
-          end: "latest",
-          style: "ticks",
-          adjust_start_time: 1
-        });
-        const prices = hist?.history?.prices || [];
-        const times = hist?.history?.times || [];
-        for (let i = 0; i < prices.length; i++) {
-          const q = prices[i];
-          const epoch = times[i] ? parseInt(times[i], 10) : Math.floor(Date.now() / 1000);
-          this.marketState.pushTick(q, epoch);
-        }
-        this.renderAll();
-        uiLog(`Loaded ${prices.length} historical ticks for ${symbol}.`, "HIST");
-      } catch (e) { uiLog(`Failed to load history for ${symbol}.`, "HIST"); }
-
-      // tick handler
-      this._tickUnsub = this.deriv.on("tick", (data) => {
-        const t = data?.tick;
-        if (!t || t.symbol !== symbol) return;
-        const change = this.marketState.pushTick(t.quote, t.epoch || Math.floor(Date.now() / 1000));
-        this.renderAll();
-        if (change && this.analyzing) this.handlePossibleBreakout(change);
-      });
-
-      try {
-        const live = await this.deriv.send({ ticks: symbol, subscribe: 1 });
-        this.tickSubId = live?.subscription?.id || null;
-        uiLog(`Subscribed to live ticks for ${symbol}.`, "TICKS");
-      } catch (e) { uiLog(`Failed to subscribe live ticks for ${symbol}.`, "TICKS"); }
-
-      if (!initial) toast({ title: "Market subscribed", msg: `Streaming ${symbol}.`, ok: true });
-    }
-
-    handlePossibleBreakout(change) {
-      try {
-        // blind-phase short-circuit
-        if (this.isTrading) { uiLog(`Signal ignored (blind-phase: trading) — breakout ${change.breakout}`, this.currentSymbol); return; }
-        if (this.isShiftingMarket) { uiLog(`Signal ignored (blind-phase: shifting) — breakout ${change.breakout}`, this.currentSymbol); return; }
-        if (this.cycleInProgress) { uiLog(`Signal ignored (cycle in progress) — breakout ${change.breakout}`, this.currentSymbol); return; }
-
-        const minRun = Math.max(1, parseInt(this.$minRun?.value || "2", 10) || 2);
-        if (change.runLen >= minRun) {
-          const breakout = change.breakout;
-          const { desc, asc } = this.marketState.distributionRanks();
-          const top3 = desc.slice(0, 3).map(x => x.d);
-          const bottom2 = asc.slice(0, 2).map(x => x.d);
-          const excluded = new Set([...top3, ...bottom2]);
-          if (excluded.has(breakout)) {
-            this.marketState.ignored += 1;
-            uiLog(`Ignored breakout ${breakout} due to exclusion (top3/bottom2).`, this.currentSymbol);
-          } else {
-            this.marketState.signals += 1;
-            this.armedDigit = breakout;
-            showArmedOverlay(breakout);
-            uiLog(`ARMED signal — breakout digit ${breakout}`, this.currentSymbol);
-            if (this.tradingEnabled && !this.isTrading && !this.isShiftingMarket && !this.cycleInProgress) {
-              // start very fast sequential buys: ensures all X trades are purchased
-              this.startFastSequentialCycle(breakout).catch(e => uiLog(`Fast seq cycle error: ${String(e?.message || e)}`, "CYCLE"));
-            }
           }
+
+          Notifier.updateArming({digit:A, windowLeft: State.v2.windowLeft, stream: State.v2.stream, mode:'count'});
+
+          return;
+
         }
-      } catch (e) { uiLog(`Error in handlePossibleBreakout: ${String(e?.message || e)}`, "ANALYSIS"); }
+
+      }
+
+      // AFTER reappearance: breakout is the first non-A tick
+
+      if(State.v2.reappeared && d !== A){
+
+        const { blocked } = inExtremes(A);
+
+        if(blocked){
+
+          Logger.warn(`Trigger ignored: digit [${A}] is among extremes at trigger.`);
+
+          Notifier.fadeOutArmingQuick();
+
+          reset(); return;
+
+        }
+
+        if(State.startGate && !State.execLock){
+
+          Notifier.markExecuting(A); // keep banner VISIBLE through the whole phase
+
+          ExecutionEngine.executeSignal({ armedDigit: A })
+
+            .finally(()=>{ reset(); }); // banner fade happens inside phase completion (before summary)
+
+        }else{
+
+          Logger.info('Trigger formed but bot not started.');
+
+          Notifier.fadeOutArmingQuick();
+
+          reset();
+
+        }
+
+        return;
+
+      }
+
+      // Still in reappearance streak (d === A): maintain live stream; countdown chip shows "—"
+
+      Notifier.updateArming({digit:A, windowLeft: '—', stream: State.v2.stream, mode:'count'});
+
     }
 
-    // Fast sequential pipeline: proposal -> buy for each trade, micro-delay between trades
-    async startFastSequentialCycle(armedDigit) {
-      if (this.isTrading || this.isShiftingMarket || this.cycleInProgress) {
-        uiLog("Start request ignored due to blind-phase or ongoing cycle.", this.currentSymbol);
-        return;
-      }
+    return { onNewDigit, reset };
 
-      this.cycleInProgress = true;
-      this.analyzing = false;
-      this.isTrading = true; // ignore incoming signals while placing buys
-      cycleInfo.textContent = `Armed ${armedDigit} • executing ${this.$tps?.value || 1} trades...`;
+  })();
 
-      const tradesPerSignal = Math.max(1, parseInt(this.$tps?.value || "1", 10) || 1);
-      let purchasesCompleted = 0;
+  /** ----------------------------- Execution Engine ---------------------- */
 
-      // compute consistent batch stake to avoid per-loop balance recomputation slowdown
-      const pct = Math.max(1, Math.min(100, parseFloat(this.$stakePct?.value || "50")));
-      const threshold = Math.max(0, parseFloat(this.$lowTh?.value || "0.35"));
-      let stake = (this.balance || 0) * (pct / 100);
-      if (stake < threshold) stake = this.balance;
-      stake = Math.max(threshold, Math.floor((stake + 1e-9) * 100) / 100);
+  const ExecutionEngine = (() => {
 
-      if (stake <= 0) {
-        uiLog("Insufficient balance for batch trades - aborting cycle.", "TRADE");
-        this.isTrading = false;
-        this.analyzing = true;
-        this.cycleInProgress = false;
-        hideArmedOverlay();
-        return;
-      }
+    const pocHandlers = new Map();
 
-      // helper with small retry attempts for proposal
-      const getProposalId = async (attempt = 0) => {
-        try {
-          const resp = await this.deriv.send({
-            proposal: 1,
-            amount: Number(stake.toFixed(2)),
-            basis: "stake",
-            contract_type: "DIGITDIFF",
-            currency: this.currency || "USD",
-            duration: 1,
-            duration_unit: "t",
-            symbol: this.currentSymbol,
-            barrier: String(armedDigit)
-          });
-          return resp?.proposal?.id || null;
-        } catch (e) {
-          if (attempt < 2) {
-            // tiny backoff
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, 10));
-            return getProposalId(attempt + 1);
-          }
-          return null;
+    function attachPOC(contract_id, subId, resolve, reject){
+
+      const handler = (msg) => {
+
+        const poc = msg.proposal_open_contract;
+
+        if(!poc || poc.contract_id !== contract_id) return;
+
+        if(poc.is_expired || poc.is_sold){
+
+          const profit = Number(poc.profit) || 0;
+
+          if(subId){ WS.send({ forget: subId }).catch(()=>{}); }
+
+          const set = pocHandlers.get(contract_id);
+
+          if(set){ WS.off('proposal_open_contract', set); pocHandlers.delete(contract_id); }
+
+          resolve(profit);
+
         }
+
       };
 
-      // helper buy (small retries)
-      const doBuy = async (proposalId, attempt = 0) => {
-        try {
-          const resp = await this.deriv.send({ buy: proposalId, price: Number(stake.toFixed(2)) });
-          return resp;
-        } catch (e) {
-          if (attempt < 2) {
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, 10));
-            return doBuy(proposalId, attempt + 1);
-          }
-          return null;
-        }
+      pocHandlers.set(contract_id, handler);
+
+      WS.on('proposal_open_contract', handler);
+
+      setTimeout(()=>{
+
+        try{ if(subId) WS.send({ forget: subId }); }catch(_){}
+
+        const set = pocHandlers.get(contract_id);
+
+        if(set){ WS.off('proposal_open_contract', set); pocHandlers.delete(contract_id); }
+
+        reject(new Error('Contract monitor timeout'));
+
+      }, 60_000);
+
+    }
+
+    async function ensureBalanceSub(){
+
+      if(State.balanceSubId) return;
+
+      try{
+
+        const resp = await WS.send({ balance: 1, subscribe: 1 });
+
+        const subId = resp.subscription?.id || resp.balance?.id;
+
+        State.balanceSubId = subId || null;
+
+      }catch(_){ /* ignore */ }
+
+    }
+
+    async function getProposal({amount, contract_type, symbol, barrier}){
+
+      const payload = {
+
+        proposal: 1,
+
+        amount: Number(amount),
+
+        basis: "stake",
+
+        contract_type,
+
+        currency: "USD",
+
+        symbol,
+
+        duration: 1,
+
+        duration_unit: "t",
+
+        barrier: String(barrier)
+
       };
 
-      try {
-        for (let i = 1; i <= tradesPerSignal; i++) {
-          if (!this.tradingEnabled) break;
+      const resp = await WS.send(payload);
 
-          // check TP/SL quickly (pre-buy)
-          if (this.takeProfit && this.pnl >= this.takeProfit) {
-            uiLog("Take Profit reached — stopping buys.", "RISK");
-            toast({ title: "TP reached", msg: `P/L ${this.pnl.toFixed(2)} ${this.currency}`, ok: true, long: true });
-            this.tradingEnabled = false;
-            break;
-          }
-          if (this.stopLoss && -this.pnl >= this.stopLoss) {
-            uiLog("Stop Loss reached — stopping buys.", "RISK");
-            toast({ title: "SL reached", msg: `P/L ${this.pnl.toFixed(2)} ${this.currency}`, ok: false, long: true });
-            this.tradingEnabled = false;
-            break;
-          }
+      if(resp.error){ throw new Error(resp.error.message || 'Proposal error'); }
 
-          // 1) get proposal id (fast)
-          const proposalId = await getProposalId();
-          if (!proposalId) {
-            uiLog(`Proposal failed for trade ${i}; continuing to next quickly.`, "TRADE");
-            // tiny micro-delay before continuing to next iteration
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, this.microDelayMs));
-            continue;
-          }
+      return resp.proposal;
 
-          // 2) buy immediately
-          const buyResp = await doBuy(proposalId);
-          if (!buyResp || !buyResp.buy || !buyResp.buy.contract_id) {
-            uiLog(`Buy failed for trade ${i}; proposal_id ${proposalId}`, "BUY");
-            // micro-delay and continue
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, this.microDelayMs));
-            continue;
-          }
+    }
 
-          const contract_id = buyResp.buy.contract_id;
-          // track contract for later settlement handling
-          this.contractMap.set(contract_id, {
-            stake,
-            symbol: this.currentSymbol,
-            barrier: armedDigit,
-            bought_at: Date.now(),
-            symbolState: this.marketState
-          });
+    async function buyProposal(pid, price){
 
-          // immediate UI updates
-          purchasesCompleted++;
-          this.marketState.trades += 1;
-          this.marketState.stakes.push(stake);
-          this.tradesExecutedThisMarket += 1;
-          // quick buy toast
-          toast({ title: `Bought (${purchasesCompleted}/${tradesPerSignal})`, msg: `${this.currentSymbol} • barrier ${armedDigit} • stake ${stake.toFixed(2)}`, ok: true, short: true });
-          uiLog(`Buy placed ${purchasesCompleted}/${tradesPerSignal} • contract ${contract_id} • stake ${stake.toFixed(2)}`, "BUY");
+      const payload = { buy: pid, price: Number(price) };
 
-          // micro-delay to let network breathe (very small)
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise(r => setTimeout(r, this.microDelayMs));
+      const resp = await WS.send(payload);
+
+      if(resp.error){ throw new Error(resp.error.message || 'Buy error'); }
+
+      return resp.buy;
+
+    }
+
+    async function monitorContract(contract_id){
+
+      const resp = await WS.send({ proposal_open_contract: 1, contract_id, subscribe: 1 });
+
+      const subId = resp.subscription?.id;
+
+      return new Promise((resolve, reject)=> attachPOC(contract_id, subId, resolve, reject));
+
+    }
+
+    function sessionCheckPL(){
+
+      const tp = posOr($('takeProfit').value, 0);
+
+      const sl = posOr($('stopLoss').value, 0);
+
+      if(tp>0 && State.sessionPL >= tp){
+
+        Logger.ok('Take Profit reached. Pausing.');
+
+        State.startGate=false;
+
+        $('execMode').textContent = 'Exec Mode: Analysis';
+
+        return 'TP';
+
+      }
+
+      if(sl>0 && State.sessionPL <= -Math.abs(sl)){
+
+        Logger.warn('Stop Loss reached. Pausing.');
+
+        State.startGate=false;
+
+        $('execMode').textContent = 'Exec Mode: Analysis';
+
+        return 'SL';
+
+      }
+
+      return null;
+
+    }
+
+    async function buyWithRetries(pid, price, retries=3){
+
+      for(let i=0;i<=retries;i++){
+
+        try{ return await buyProposal(pid, price); }
+
+        catch(e){ Logger.warn(`Buy retry (${i+1}) due to: ${e?.message||e}`); await sleep(jitter(100,150)); }
+
+      }
+
+      throw new Error('Buy failed after retries');
+
+    }
+
+    async function runSingle({armedDigit, contractType, amount}){
+
+      const proposal = await getProposal({ amount, contract_type: contractType, symbol: State.market, barrier: armedDigit });
+
+      const pid = proposal.id;
+
+      const bulkN = $('bulkToggle').checked ? clamp(numOr($('bulkCount').value,2), 2, 10) : 1;
+
+      const buys = await Promise.all(new Array(bulkN).fill(0).map(()=> buyWithRetries(pid, amount, 3)));
+
+      const results = await Promise.all(buys.map(b => monitorContract(b.contract_id).then(p => ({p, id:b.contract_id})).catch(()=>({p:0,id:b.contract_id}))));
+
+      const profit = results.reduce((a,c)=> a + Number(c.p||0), 0);
+
+      State.sessionPL += profit;
+
+      $('sessionPL').textContent = `P/L: ${fmt2(State.sessionPL)}`;
+
+      // Per-trade toasts
+
+      results.forEach(r => {
+
+        const sign = r.p>=0 ? '+' : '';
+
+        Notifier.toast((r.p>=0?`WIN: ${sign}$${fmt2(r.p)}`:`LOSS: ${sign}$${fmt2(r.p)}`), r.p>=0?'ok':'err', 3500);
+
+      });
+
+      // Session stats
+
+      State.session.trades += results.length;
+
+      const wins = results.filter(r=>r.p>=0).length;
+
+      const losses = results.length - wins;
+
+      State.session.wins += wins;
+
+      State.session.losses += losses;
+
+      try{ await WS.send({ balance: 1 }); }catch(_){}
+
+      return profit;
+
+    }
+
+    async function standardPhase({armedDigit}){
+
+      const runs = clamp(numOr($('runsPerSignal').value,1),1,100);
+
+      const stake = Math.max(numOr($('stakeAmount').value,0.5), 0.35);
+
+      let total=0;
+
+      for(let i=0;i<runs;i++){
+
+        if(State.stopRequested) break;
+
+        const r = await runSingle({armedDigit, contractType: 'DIGITDIFF', amount: stake});
+
+        total += r;
+
+        const stop = sessionCheckPL(); if(stop) break;
+
+      }
+
+      State.session.phases += 1;
+
+      // Banner persists through all runs; fade RIGHT BEFORE summary
+
+      Notifier.fadeOutArmingQuick();
+
+      await Notifier.summary({
+
+        title: 'Phase Complete (Standard)',
+
+        html: `<div>Runs: ${runs}</div><div>Total: ${fmt2(total)}</div>`,
+
+        seconds: 5
+
+      });
+
+      await sleep(5000);
+
+    }
+
+    async function sbrPhase({armedDigit}){
+
+      const runs = clamp(numOr($('toggleRuns').value,3),1,100);
+
+      const initial = Math.max(numOr($('toggleInitial').value,0.5), 0.35);
+
+      const mult = Math.max(numOr($('toggleMultiplier').value,2), 1.1);
+
+      let total=0, anyLoss=false, usedMultiplier=false;
+
+      for(let i=0;i<runs;i++){
+
+        if(State.stopRequested) break;
+
+        const r = await runSingle({armedDigit, contractType: 'DIGITDIFF', amount: initial});
+
+        total += r;
+
+        if(r<0){
+
+          anyLoss=true; usedMultiplier=true;
+
+          const rec = await runSingle({armedDigit, contractType: 'DIGITDIFF', amount: initial*mult});
+
+          total += rec;
+
+          State.session.sbrRecoveries += 1;
+
+          break;
+
         }
-      } catch (e) {
-        uiLog(`Exception in fast sequential cycle: ${String(e?.message || e)}`, "CYCLE");
+
+        const stop = sessionCheckPL(); if(stop) break;
+
+      }
+
+      // flawless counter
+
+      if(!usedMultiplier && !anyLoss){
+
+        State.sbr.flawlessCount += 1;
+
+      }else{
+
+        State.sbr.flawlessCount = 0;
+
+      }
+
+      State.session.phases += 1;
+
+      const needX = clamp(numOr($('sbrFlawlessPhases').value,1),1,100);
+
+      const reasonFlawless = State.sbr.flawlessCount >= needX;
+
+      const seconds = (usedMultiplier || anyLoss || reasonFlawless) ? 10 : 5;
+
+      const autoSwitch = $('autoSwitch').checked && (usedMultiplier || anyLoss || reasonFlawless);
+
+      let switchTo = null;
+
+      let reason = '';
+
+      if(usedMultiplier || anyLoss){ reason = 'Recovery after loss (multiplier applied)'; }
+
+      else if(reasonFlawless){ reason = `Flawless threshold reached (${State.sbr.flawlessCount}/${needX})`; }
+
+      if(autoSwitch){
+
+        switchTo = AutoSwitchManager.pickNextMarket();
+
+      }
+
+      // Fade banner BEFORE summary appears (requirement)
+
+      Notifier.fadeOutArmingQuick();
+
+      await Notifier.summary({
+
+        title: 'Phase Summary (SBR)',
+
+        html: `<div>Runs: ${runs}${usedMultiplier? ' + Recovery':''}</div>
+
+               <div>Any Loss: ${anyLoss? 'Yes':'No'}</div>
+
+               <div>Total: ${fmt2(total)}</div>
+
+               ${autoSwitch? `<div><b>Reason:</b> ${reason}</div>
+
+               <div><b>Switching to:</b> ${switchTo}</div>`:''}`,
+
+        seconds
+
+      });
+
+      if(reasonFlawless){ State.sbr.flawlessCount = 0; }
+
+      if(autoSwitch && switchTo){
+
+        await AutoSwitchManager.switchTo(switchTo);
+
+      }
+
+      await sleep(5000);
+
+    }
+
+    async function executeSignal({armedDigit}){
+
+      if(State.execLock) return;
+
+      State.execLock = true;
+
+      State.execMode = 'Executing';
+
+      UI.setChip('execMode','Exec Mode: Executing','exec');
+
+      UI.setChip('signalState','Signal State: Executing','executing');
+
+      setInputsExecutionLocked(true);
+
+      await ensureBalanceSub();
+
+      try{
+
+        if($('toggleEnabled').checked){
+
+          await sbrPhase({armedDigit});
+
+        }else{
+
+          await standardPhase({armedDigit});
+
+        }
+
+      } catch(e){
+
+        Logger.err(`ExecuteSignal error: ${e?.message||e}`);
+
       } finally {
-        // end buying phase
-        this.isTrading = false;
-        this.analyzing = true;
-        this.cycleInProgress = false;
-        hideArmedOverlay();
-        cycleInfo.textContent = "—";
-      }
 
-      const completedFullCycle = (purchasesCompleted === tradesPerSignal);
+        State.execMode = 'Analysis';
 
-      if (completedFullCycle) {
-        // begin safe shift (blind-phase)
-        try {
-          this.isShiftingMarket = true;
-          uiLog(`Completed ${purchasesCompleted}/${tradesPerSignal} buys — initiating safe shift...`, this.currentSymbol);
+        UI.setChip('execMode','Exec Mode: Analysis');
 
-          const next = this.nextMarketSymbol();
-          const summary = {
-            market: `${findMarketMeta(this.currentSymbol).sym} – ${findMarketMeta(this.currentSymbol).name}`,
-            timeframe: this.marketState.timeframeStr(),
-            signals: this.marketState.signals,
-            trades: this.marketState.trades,
-            wins: this.marketState.wins,
-            losses: this.marketState.losses,
-            net_pl: this.pnl,
-            avg_stake: this.marketState.stakes.length ? (this.marketState.stakes.reduce((a,b)=>a+b,0)/this.marketState.stakes.length) : 0,
-            ignored: this.marketState.ignored,
-            nextMarket: `${findMarketMeta(next).sym} – ${findMarketMeta(next).name}`,
-            ccy: this.currency
-          };
+        UI.setChip('signalState','Signal State: Idle');
 
-          // overlay 10s
-          await showShiftOverlay(summary, 10);
+        State.execLock = false;
 
-          // subscribe to new market (still in shifting blind-phase until subscribe returns)
-          await this.changeMarket(next);
+        setInputsExecutionLocked(false);
 
-          uiLog(`Shift complete. Entered market ${this.currentSymbol}`, "SHIFT");
-        } catch (e) {
-          uiLog(`Error during safe shift: ${String(e?.message || e)}`, "SHIFT");
-        } finally {
-          this.isShiftingMarket = false;
-          this.tradesExecutedThisMarket = 0;
+        if(!State.startGate && State.session.active){
+
+          await showSessionSummary();
+
         }
-      } else {
-        uiLog(`Did not complete full set (${purchasesCompleted}/${tradesPerSignal}). No market shift.`, "CYCLE");
+
       }
+
     }
 
-    // Old synchronous fallback (kept but not used by main fast path)
-    async oneDigitDifferTrade(symbol, barrierDigit, amount) {
-      try {
-        const proposal = await this.deriv.send({
-          proposal: 1,
-          amount: Number(amount.toFixed(2)),
-          basis: "stake",
-          contract_type: "DIGITDIFF",
-          currency: this.currency || "USD",
-          duration: 1,
-          duration_unit: "t",
-          symbol,
-          barrier: String(barrierDigit)
-        });
-        const proposalId = proposal?.proposal?.id;
-        if (!proposalId) throw new Error("Proposal failed");
-        const buy = await this.deriv.send({ buy: proposalId, price: Number(amount.toFixed(2)) });
-        const contract_id = buy?.buy?.contract_id;
-        if (!contract_id) throw new Error("Buy failed (no contract_id)");
-        this.contractMap.set(contract_id, {
-          stake: amount,
-          symbol,
-          barrier: barrierDigit,
-          bought_at: Date.now(),
-          symbolState: this.marketState
-        });
-        return { contract_id, buy_price: buy?.buy?.buy_price || 0 };
-      } catch (e) {
-        uiLog(`Buy failed (fallback): ${String(e?.message || e)}`, "BUY");
-        return null;
+    async function showSessionSummary(){
+
+      try{
+
+        const bal = await WS.send({ balance: 1 });
+
+        const amt = bal.balance?.balance ?? State.balance;
+
+        State.balance = Number(amt)||0;
+
+        $('balance').textContent = `Balance: ${fmt2(State.balance)}`;
+
+      }catch(_){}
+
+      const endBal = State.balance;
+
+      const startBal = State.session.startBalance;
+
+      const net = endBal - startBal;
+
+      const marketsArr = Array.from(State.session.markets);
+
+      await Notifier.summary({
+
+        title: 'SESSION SUMMARY',
+
+        html: `<div><b>Start:</b> ${fmt2(startBal)} | <b>End:</b> ${fmt2(endBal)} | <b>Net:</b> ${fmt2(net)}</div>
+
+               <div><b>Trades:</b> ${State.session.trades} | <b>Wins:</b> ${State.session.wins} | <b>Losses:</b> ${State.session.losses}</div>
+
+               <div><b>Phases:</b> ${State.session.phases} | <b>SBR Recoveries:</b> ${State.session.sbrRecoveries}</div>
+
+               <div><b>Markets Visited:</b> ${marketsArr.length? marketsArr.join(' → ') : State.market}</div>`,
+
+        seconds: 5
+
+      });
+
+      resetSessionStats();
+
+    }
+
+    return { executeSignal, showSessionSummary };
+
+  })();
+
+  /** ----------------------------- Auto-Switch Manager ------------------- */
+
+  const AutoSwitchManager = (() => {
+
+    const selectEl = $('marketSelect');
+
+    function allOptions(){
+
+      return Array.from(selectEl.options).map(o=>({value:o.value, label:o.textContent}));
+
+    }
+
+    function currentIndexInSeq(){
+
+      const seq = State.marketSequence.length ? State.marketSequence : allOptions().map(o=>o.value);
+
+      const idx = seq.indexOf(State.market);
+
+      return { seq, idx };
+
+    }
+
+    function pickNextMarket(){
+
+      const checked = State.marketSequence.length ? State.marketSequence : allOptions().map(o=>o.value);
+
+      if(!$('randomMarket').checked){
+
+        const { seq, idx } = currentIndexInSeq();
+
+        const next = seq[(idx+1) % seq.length];
+
+        return next;
+
       }
+
+      const i = Math.floor(Math.random()*checked.length);
+
+      return checked[i];
+
     }
 
-    nextMarketSymbol() {
-      if (this.rotationMode === "random") {
-        const others = MARKETS.map(m => m.sym).filter(s => s !== this.currentSymbol);
-        return others[Math.floor(Math.random() * others.length)];
-      }
-      this.seriesIdx = (this.seriesIdx + 1) % MARKETS.length;
-      return MARKETS[this.seriesIdx].sym;
+    async function switchTo(symbol){
+
+      Logger.warn(`Switching market to ${symbol}`);
+
+      if(State.tickSubId){ try{ await WS.send({ forget: State.tickSubId }); }catch(_){ } State.tickSubId=null; }
+
+      State.digitsRolling = [];
+
+      State.distribution = Array(10).fill(0);
+
+      UI.setDistribution(State.distribution, 0);
+
+      UI.setDigitStrip([], Number($('identicalCount').value));
+
+      SignalEngine.reset?.();
+
+      Notifier.hideArming();
+
+      $('marketSelect').value = symbol;
+
+      State.market = symbol;
+
+      $('marketNow').textContent = `Market: ${symbol}`;
+
+      if(State.session.active) State.session.markets.add(symbol);
+
+      State.sbr.flawlessCount = 0; // reset flawless on switch
+
+      await TickEngine.subscribeTicks(symbol);
+
+      await TickEngine.seedHistory(symbol, State.historyN);
+
     }
 
-    async changeMarket(symbol) {
-      try { await this.forgetAll("ticks"); } catch (_) { }
-      this.tickSubId = null;
-      this.currentSymbol = symbol;
-      if (this.$marketSelect) this.$marketSelect.value = symbol;
-      if (marketName) marketName.textContent = `${findMarketMeta(symbol).sym} – ${findMarketMeta(symbol).name}`;
-      await this.subscribeMarket(symbol);
-      toast({ title: "Market changed", msg: `Now streaming ${symbol}`, ok: true });
-    }
+    return { pickNextMarket, switchTo };
 
-    async toggleStart(on) {
-      this.tradingEnabled = !!on;
-      if (this.tradingEnabled) {
-        toast({ title: "Trading ENABLED", msg: "Bot will trade on next armed valid signal." });
-        uiLog("Trading enabled. Waiting for valid signal…", "STATE");
-      } else {
-        toast({ title: "Trading STOPPED", msg: "No new trades will be placed.", ok: false });
-        uiLog("Trading stopped by user.", "STATE");
-      }
-    }
+  })();
 
-    async forgetAll(stream) {
-      try { await this.deriv.send({ forget_all: stream }); } catch (_) { }
-    }
+  /** ----------------------------- Input & Wiring ------------------------ */
 
-    renderAll() {
-      try {
-        renderLast7(this.marketState.last7);
-        const total = this.marketState.queue.length;
-        renderDistribution(this.marketState.counts, total);
-        if (this.balance !== undefined && balanceVal) balanceVal.textContent = (this.balance || 0).toFixed(2);
-        if (pnlVal) pnlVal.textContent = (this.pnl || 0).toFixed(2);
-        if (marketName) marketName.textContent = `${findMarketMeta(this.currentSymbol).sym} – ${findMarketMeta(this.currentSymbol).name}`;
-      } catch (e) { /* ignore */ }
-    }
+  function debounce(id, fn, ms=400){
+
+    if(State.debounceTimers.has(id)) clearTimeout(State.debounceTimers.get(id));
+
+    const t = setTimeout(()=>{ State.debounceTimers.delete(id); fn(); }, ms);
+
+    State.debounceTimers.set(id, t);
+
   }
 
-  // instantiate and expose for debugging
-  const bot = new RiskTakerBot();
-  window.RTBot = bot;
+  function resetSessionStats(){
+
+    State.session.active = false;
+
+    State.session.startBalance = 0;
+
+    State.session.startTime = null;
+
+    State.session.trades = 0;
+
+    State.session.wins = 0;
+
+    State.session.losses = 0;
+
+    State.session.phases = 0;
+
+    State.session.sbrRecoveries = 0;
+
+    State.session.markets = new Set([State.market]);
+
+    State.sessionPL = 0;
+
+    $('sessionPL').textContent = `P/L: ${fmt2(State.sessionPL)}`;
+
+  }
+
+  function captureUI(){
+
+    $('connectBtn').addEventListener('click', async ()=>{
+
+      try{
+
+        await WS.connect();
+
+        const token = $('apiToken').value.trim();
+
+        const auth = await WS.send({ authorize: token });
+
+        State.authorized = true;
+
+        State.accountId = auth.authorize?.loginid || '—';
+
+        $('accountId').textContent = State.accountId;
+
+        Logger.ok('Authorized.');
+
+        try{
+
+          const bal = await WS.send({ balance: 1, subscribe: 1 });
+
+          const amt = bal.balance?.balance ?? 0;
+
+          State.balance = Number(amt)||0;
+
+          $('balance').textContent = `Balance: ${fmt2(State.balance)}`;
+
+          State.balanceSubId = bal.subscription?.id || null;
+
+          WS.on('balance', msg=>{
+
+            const b = msg.balance;
+
+            if(typeof b?.balance !== 'undefined'){
+
+              State.balance = Number(b.balance)||0;
+
+              $('balance').textContent = `Balance: ${fmt2(State.balance)}`;
+
+            }
+
+          });
+
+        }catch(_){ Logger.warn('Balance subscription failed'); }
+
+        State.market = $('marketSelect').value;
+
+        await TickEngine.subscribeTicks(State.market);
+
+        await TickEngine.seedHistory(State.market, State.historyN);
+
+        UI.setChip('execMode','Exec Mode: Analysis');
+
+        Logger.ok('Ready for analysis. Click Start to trade.');
+
+      }catch(e){
+
+        Logger.err(`Connect/Auth failed: ${e?.message||e}`);
+
+      }
+
+    });
+
+    $('disconnectBtn').addEventListener('click', async ()=>{
+
+      try{
+
+        if(State.tickSubId){ await WS.send({ forget: State.tickSubId }); State.tickSubId=null; }
+
+        if(State.balanceSubId){ await WS.send({ forget: State.balanceSubId }); State.balanceSubId=null; }
+
+      }catch(_){}
+
+      WS.close();
+
+      State.authorized=false;
+
+      $('connBadge').textContent='DISCONNECTED';
+
+      Logger.warn('Disconnected.');
+
+      Notifier.hideArming();
+
+    });
+
+    $('startBtn').addEventListener('click', ()=>{
+
+      State.startGate = true; State.stopRequested=false;
+
+      State.sessionPL = 0;
+
+      $('sessionPL').textContent = `P/L: ${fmt2(State.sessionPL)}`;
+
+      State.session.active = true;
+
+      State.session.startTime = new Date();
+
+      State.session.startBalance = State.balance;
+
+      State.session.markets = new Set([State.market]);
+
+      State.session.trades = 0; State.session.wins=0; State.session.losses=0; State.session.phases=0; State.session.sbrRecoveries=0;
+
+      Notifier.toast('Bot STARTED', 'ok', 1200);
+
+    });
+
+    $('stopBtn').addEventListener('click', async ()=>{
+
+      State.stopRequested = true; State.startGate=false;
+
+      Notifier.toast('Bot STOP requested (will finish current phase)', 'warn', 1800);
+
+      if(State.execMode!=='Executing'){
+
+        Notifier.hideArming();
+
+      }
+
+      if(!State.execLock && State.session.active){
+
+        await ExecutionEngine.showSessionSummary();
+
+      }
+
+    });
+
+    $('clearLog').addEventListener('click', ()=> Logger.clear());
+
+    $('marketSelect').addEventListener('change', ()=>{
+
+      const symbol = $('marketSelect').value;
+
+      State.market = symbol;
+
+      $('marketNow').textContent = `Market: ${symbol}`;
+
+      debounce('marketChange', async ()=>{
+
+        try{
+
+          if(State.tickSubId){ await WS.send({ forget: State.tickSubId }); State.tickSubId=null; }
+
+          await TickEngine.subscribeTicks(symbol);
+
+          await TickEngine.seedHistory(symbol, State.historyN);
+
+          if(State.session.active) State.session.markets.add(symbol);
+
+          Notifier.hideArming();
+
+        }catch(e){ Logger.err(`Market switch error: ${e?.message||e}`); }
+
+      }, 200);
+
+    });
+
+    $('contractType').addEventListener('change', ()=> {
+
+      State.contractType = $('contractType').value;
+
+      Logger.info(`Contract UI set to ${State.contractType} (execution uses DIGITDIFF on breakout)`);
+
+    });
+
+    // History N: sanitize on change (no mid-typing)
+
+    $('historyCount').addEventListener('change', ()=>{
+
+      const N = clamp(numOr($('historyCount').value,1000),100,5000);
+
+      $('historyCount').value = String(N);
+
+      State.historyN = N;
+
+      if(!State.authorized || !WS.isOpen()) return;
+
+      TickEngine.seedHistory(State.market, N).catch(e=>Logger.err(`History reseed failed: ${e?.message||e}`));
+
+    });
+
+    // Bulk
+
+    $('bulkToggle').addEventListener('change', ()=>{
+
+      State.bulk.enabled = $('bulkToggle').checked;
+
+      if(State.bulk.enabled && $('toggleEnabled').checked){
+
+        Notifier.toast('SBR governs stake/runs; Bulk only adds parallel buys.', 'warn', 2600);
+
+      }
+
+    });
+
+    $('bulkCount').addEventListener('change', ()=>{
+
+      const v = clamp(numOr($('bulkCount').value,2),2,10);
+
+      $('bulkCount').value = String(v);
+
+      State.bulk.count = v;
+
+    });
+
+    // SBR toggle & fields — sanitize on change only
+
+    $('toggleEnabled').addEventListener('change', ()=>{
+
+      State.sbr.enabled = $('toggleEnabled').checked;
+
+      enforceSeparationUI();
+
+      if(State.sbr.enabled){
+
+        Notifier.toast('SBR ON: Core stake/runs are inactive. Bulk still applies.', 'warn', 2600);
+
+      }
+
+    });
+
+    $('toggleInitial').addEventListener('change', ()=>{
+
+      const val = Math.max(numOr($('toggleInitial').value,0.5), 0.35);
+
+      $('toggleInitial').value = String(val.toFixed(2));
+
+      State.sbr.initial = val;
+
+    });
+
+    $('toggleMultiplier').addEventListener('change', ()=>{
+
+      const val = Math.max(numOr($('toggleMultiplier').value,2), 1.1);
+
+      $('toggleMultiplier').value = String(val);
+
+      State.sbr.multiplier = val;
+
+    });
+
+    $('toggleRuns').addEventListener('change', ()=>{
+
+      const val = clamp(numOr($('toggleRuns').value,3),1,100);
+
+      $('toggleRuns').value = String(val);
+
+      State.sbr.runs = val;
+
+    });
+
+    $('sbrFlawlessPhases').addEventListener('change', ()=>{
+
+      const val = clamp(numOr($('sbrFlawlessPhases').value,2),1,100);
+
+      $('sbrFlawlessPhases').value = String(val);
+
+      State.sbr.flawlessNeeded = val;
+
+    });
+
+    // Market sequence UI
+
+    const marketOptions = Array.from($('marketSelect').options).map(o=>({value:o.value, label:o.textContent}));
+
+    UI.buildMarketPicker(marketOptions);
+
+    UI.previewAltSequence(State.marketSequence);
+
+    $('toggleMarketPicker').addEventListener('click', ()=>{
+
+      $('marketPicker').classList.toggle('hidden');
+
+      adjustHeaderOffset();
+
+    });
+
+    $('marketPicker').addEventListener('change', ()=>{
+
+      State.marketSequence = UI.getMarketPickerSelection();
+
+      UI.previewAltSequence(State.marketSequence);
+
+    });
+
+    $('clearMarketAlt').addEventListener('click', ()=>{
+
+      State.marketSequence = [];
+
+      UI.buildMarketPicker(marketOptions.map(o=>({ ...o, checked:false })));
+
+      UI.previewAltSequence(State.marketSequence);
+
+    });
+
+  }
+
+  /** ----------------------------- Boot ---------------------------------- */
+
+  function boot(){
+
+    captureUI();
+
+    UI.setBadge('connBadge','DISCONNECTED');
+
+    UI.setBadge('accountId','—');
+
+    UI.setBadge('balance','Balance: —');
+
+    UI.setBadge('sessionPL','P/L: 0.00');
+
+    UI.setBadge('marketNow',`Market: ${State.market}`);
+
+    UI.setChip('armedStatus','Armed?: No');
+
+    UI.setChip('armedDigit','Armed Digit: —');
+
+    UI.setChip('signalState','Signal State: Idle');
+
+    UI.setChip('execMode','Exec Mode: Analysis');
+
+    enforceSeparationUI();
+
+    resetSessionStats();
+
+    adjustHeaderOffset();
+
+  }
+
+  boot();
 
 })();
